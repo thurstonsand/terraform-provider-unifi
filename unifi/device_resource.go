@@ -88,14 +88,15 @@ type deviceIdentityModel struct {
 
 // deviceResourceModel describes the resource data model.
 type deviceResourceModel struct {
-	ID              types.String       `tfsdk:"id"`
-	Site            types.String       `tfsdk:"site"`
-	MAC             hwtypes.MACAddress `tfsdk:"mac"`
-	Name            types.String       `tfsdk:"name"`
-	Disabled        types.Bool         `tfsdk:"disabled"`
-	PortOverride    types.Set          `tfsdk:"port_override"`
-	AllowAdoption   types.Bool         `tfsdk:"allow_adoption"`
-	ForgetOnDestroy types.Bool         `tfsdk:"forget_on_destroy"`
+	ID               types.String       `tfsdk:"id"`
+	Site             types.String       `tfsdk:"site"`
+	MAC              hwtypes.MACAddress `tfsdk:"mac"`
+	Name             types.String       `tfsdk:"name"`
+	Disabled         types.Bool         `tfsdk:"disabled"`
+	PortOverride     types.Set          `tfsdk:"port_override"`
+	EthernetOverride types.List         `tfsdk:"ethernet_override"`
+	AllowAdoption    types.Bool         `tfsdk:"allow_adoption"`
+	ForgetOnDestroy  types.Bool         `tfsdk:"forget_on_destroy"`
 
 	// Network configuration
 	ConfigNetwork types.Object `tfsdk:"config_network"`
@@ -992,6 +993,38 @@ func (r *deviceResource) Schema(
 					},
 				},
 			},
+			"ethernet_override": schema.ListNestedBlock{
+				Description: "Assigns a physical interface of a gateway (UDM/UXG) to a network " +
+					"group, which is how a port is made a WAN, a WAN2, or a LAN port. Only the " +
+					"interfaces you declare are managed: the provider overlays them onto the " +
+					"device's current `ethernet_overrides` list, so undeclared interfaces keep " +
+					"their existing assignment and their other settings. Declaring no block at " +
+					"all leaves the whole list unmanaged, and removing every block relinquishes " +
+					"ownership without resetting anything on the controller.",
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"ifname": schema.StringAttribute{
+							Description: "Physical interface name, e.g. `eth8`. The interface must " +
+								"already exist on the device.",
+							Required: true,
+							Validators: []validator.String{
+								stringvalidator.RegexMatches(
+									ethernetIfnamePattern,
+									"must be an interface name of the form eth0-eth99",
+								),
+							},
+						},
+						"network_group": schema.StringAttribute{
+							Description: "Network group the interface belongs to: `WAN`, `WAN2`-`WAN9`, " +
+								"`LAN`, `LAN2`-`LAN8`, or `MGMT`.",
+							Required: true,
+							Validators: []validator.String{
+								stringvalidator.OneOf(ethernetNetworkGroups...),
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 }
@@ -1293,6 +1326,7 @@ func (r *deviceResource) Read(
 	allowAdoption := state.AllowAdoption
 	forgetOnDestroy := state.ForgetOnDestroy
 	priorPortOverride := state.PortOverride
+	priorEthernetOverride := state.EthernetOverride
 
 	// The identity (device MAC) may be the only key available — e.g. the state
 	// written by an identity-based import carries just the MAC. Fall back to it
@@ -1378,6 +1412,16 @@ func (r *deviceResource) Read(
 		if !resp.Diagnostics.HasError() {
 			state.PortOverride = reconciled
 		}
+	}
+
+	// Refresh the declared interfaces' network group from the device so a
+	// controller-side reassignment surfaces as drift, without pulling the
+	// device's other interfaces into state.
+	refreshedEthernet, ethDiags := refreshEthernetOverrides(
+		ctx, priorEthernetOverride, device.EthernetOverrides)
+	resp.Diagnostics.Append(ethDiags...)
+	if !resp.Diagnostics.HasError() {
+		state.EthernetOverride = refreshedEthernet
 	}
 
 	resp.Diagnostics.Append(resp.Identity.SetAttribute(ctx, path.Root("mac"), state.MAC)...)
@@ -1743,6 +1787,12 @@ func (r *deviceResource) ImportState(
 // plan (user-configured, or state-inherited via the list's UseStateForUnknown),
 // its non-zero sub-fields (channel, tx_power, …) also travel in the PUT; sending
 // back the values the controller already returned is idempotent.
+//
+// ethernet_overrides is carried only when the resource actually manages it.
+// resolveEthernetOverridesForUpdate leaves deviceReq.EthernetOverrides nil when
+// no ethernet_override block is configured, and the field is `omitempty`, so a
+// device resource that never declares one keeps the key off the wire and its
+// PUT body byte-identical to before.
 func buildMinimalUpdateDevice(
 	deviceReq, currentDevice *unifi.Device,
 	portOverrides []unifi.DevicePortOverrides,
@@ -1776,6 +1826,7 @@ func buildMinimalUpdateDevice(
 		SwitchVLANEnabled:          deviceReq.SwitchVLANEnabled,
 		MeshStaVapEnabled:          deviceReq.MeshStaVapEnabled,
 		RadioTable:                 deviceReq.RadioTable,
+		EthernetOverrides:          deviceReq.EthernetOverrides,
 	}
 	if currentDevice != nil {
 		minimalDevice.State = currentDevice.State
@@ -1875,6 +1926,17 @@ func (r *deviceResource) updateDevice(
 	}
 
 	portOverrides := resolvePortOverridesForUpdate(currentDevice, deviceReq)
+
+	// Overlay the declared interface assignments onto the controller's current
+	// list. Nil means no ethernet_override block is configured, and stays nil so
+	// the field never reaches the PUT body.
+	ethernetOverrides, ethDiags := resolveEthernetOverridesForUpdate(
+		currentDevice.EthernetOverrides, deviceReq.EthernetOverrides)
+	diags.Append(ethDiags...)
+	if diags.HasError() {
+		return diags
+	}
+	deviceReq.EthernetOverrides = ethernetOverrides
 
 	minimalDevice := buildMinimalUpdateDevice(deviceReq, currentDevice, portOverrides)
 
@@ -2207,6 +2269,13 @@ func (r *deviceResource) modelToAPIDevice(
 		if !diags.HasError() {
 			device.PortOverrides = portOverrides
 		}
+	}
+
+	// Convert ethernet overrides
+	ethernetOverrides, ethDiags := r.frameworkToEthernetOverrides(ctx, model.EthernetOverride)
+	diags.Append(ethDiags...)
+	if !diags.HasError() {
+		device.EthernetOverrides = ethernetOverrides
 	}
 
 	// Convert radio table
@@ -3618,6 +3687,10 @@ func (r *deviceResource) deviceListToModel(
 	model.PortOverride = types.SetNull(
 		types.ObjectType{AttrTypes: portOverrideAttrTypes()},
 	)
+
+	// ethernet_override is partially owned: only the declared interfaces belong
+	// in state, and a listing declares none.
+	model.EthernetOverride = types.ListNull(ethernetOverrideObjectType())
 
 	// Write-only plan flags are never returned by the API.
 	model.AllowAdoption = types.BoolNull()

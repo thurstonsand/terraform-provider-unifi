@@ -70,6 +70,7 @@ resource "unifi_device" "us_24_poe" {
 - `bandsteering_mode` (String) Band steering mode; valid values are `off`, `equal`, and `prefer_5g`.
 - `config_network` (Attributes) Network configuration for the device. (see [below for nested schema](#nestedatt--config_network))
 - `disabled` (Boolean) Specifies whether this device should be disabled.
+- `ethernet_override` (Block List) Assigns a physical interface of a gateway (UDM/UXG) to a network group, which is how a port is made a WAN, a WAN2, or a LAN port. Only the interfaces you declare are managed: the provider overlays them onto the device's current `ethernet_overrides` list, so undeclared interfaces keep their existing assignment and their other settings. Declaring no block at all leaves the whole list unmanaged, and removing every block relinquishes ownership without resetting anything on the controller. (see [below for nested schema](#nestedblock--ethernet_override))
 - `flowctrl_enabled` (Boolean) Enable flow control.
 - `forget_on_destroy` (Boolean) Specifies whether this resource should tell the controller to forget the device on destroy.
 - `jumboframe_enabled` (Boolean) Enable jumbo frames.
@@ -122,6 +123,15 @@ Optional:
 - `ip` (String) IP address (for static configuration).
 - `netmask` (String) Network mask (for static configuration).
 - `type` (String) Network configuration type (dhcp or static).
+
+
+<a id="nestedblock--ethernet_override"></a>
+### Nested Schema for `ethernet_override`
+
+Required:
+
+- `ifname` (String) Physical interface name, e.g. `eth8`. The interface must already exist on the device.
+- `network_group` (String) Network group the interface belongs to: `WAN`, `WAN2`-`WAN9`, `LAN`, `LAN2`-`LAN8`, or `MGMT`.
 
 
 <a id="nestedatt--outlet_overrides"></a>
