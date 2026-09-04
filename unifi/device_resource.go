@@ -42,10 +42,11 @@ import (
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var (
-	_ resource.Resource                 = &deviceResource{}
-	_ resource.ResourceWithImportState  = &deviceResource{}
-	_ resource.ResourceWithIdentity     = &deviceResource{}
-	_ resource.ResourceWithUpgradeState = &deviceResource{}
+	_ resource.Resource                    = &deviceResource{}
+	_ resource.ResourceWithImportState     = &deviceResource{}
+	_ resource.ResourceWithIdentity        = &deviceResource{}
+	_ resource.ResourceWithUpgradeIdentity = &deviceResource{}
+	_ resource.ResourceWithUpgradeState    = &deviceResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -77,6 +78,12 @@ type deviceListFilterModel struct {
 // deviceResource defines the resource implementation.
 type deviceResource struct {
 	client *Client
+}
+
+// deviceIdentityModel describes the device identity: the MAC address users
+// import devices by.
+type deviceIdentityModel struct {
+	MAC hwtypes.MACAddress `tfsdk:"mac"`
 }
 
 // deviceResourceModel describes the resource data model.
@@ -262,6 +269,7 @@ func (r *deviceResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"mac": identityschema.StringAttribute{
 				CustomType:        hwtypes.MACAddressType{},
@@ -269,6 +277,19 @@ func (r *deviceResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity held the device id, which the current identity schema has no
+// place for, so the upgraded MAC stays null and Read fills it from state. That
+// is allowed precisely because every attribute of the upgraded identity is null.
+func (r *deviceResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(types.String) any {
+		return deviceIdentityModel{}
+	})
 }
 
 func (r *deviceResource) Schema(

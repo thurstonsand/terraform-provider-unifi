@@ -25,9 +25,10 @@ import (
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var (
-	_ resource.Resource                = &clientQosRateResource{}
-	_ resource.ResourceWithImportState = &clientQosRateResource{}
-	_ resource.ResourceWithIdentity    = &clientQosRateResource{}
+	_ resource.Resource                    = &clientQosRateResource{}
+	_ resource.ResourceWithImportState     = &clientQosRateResource{}
+	_ resource.ResourceWithIdentity        = &clientQosRateResource{}
+	_ resource.ResourceWithUpgradeIdentity = &clientQosRateResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -92,6 +93,7 @@ func (r *clientQosRateResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
@@ -101,6 +103,18 @@ func (r *clientQosRateResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *clientQosRateResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return clientQosRateIdentityModel{ID: id}
+	})
 }
 
 func (r *clientQosRateResource) Schema(

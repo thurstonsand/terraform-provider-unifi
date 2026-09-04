@@ -36,9 +36,10 @@ import (
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var (
-	_ resource.Resource                = &wanResource{}
-	_ resource.ResourceWithImportState = &wanResource{}
-	_ resource.ResourceWithIdentity    = &wanResource{}
+	_ resource.Resource                    = &wanResource{}
+	_ resource.ResourceWithImportState     = &wanResource{}
+	_ resource.ResourceWithIdentity        = &wanResource{}
+	_ resource.ResourceWithUpgradeIdentity = &wanResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -109,6 +110,7 @@ type wanResourceModel struct {
 	SettingPreference     types.String `tfsdk:"setting_preference"`
 	IPv6SettingPreference types.String `tfsdk:"ipv6_setting_preference"`
 	SingleNetworkLAN      types.String `tfsdk:"single_network_lan"`
+	MACOverride           types.String `tfsdk:"mac_override"`
 	MACOverrideEnabled    types.Bool   `tfsdk:"mac_override_enabled"`
 	DsliteRemoteHost      types.String `tfsdk:"wan_dslite_remote_host"`
 	DsliteRemoteHostAuto  types.Bool   `tfsdk:"wan_dslite_remote_host_auto"`
@@ -315,6 +317,7 @@ func (r *wanResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
@@ -324,6 +327,18 @@ func (r *wanResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *wanResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return wanIdentityModel{ID: id}
+	})
 }
 
 func (r *wanResource) Schema(
@@ -792,6 +807,21 @@ func (r *wanResource) Schema(
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"mac_override": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				Sensitive:           true,
+				MarkdownDescription: "MAC address presented by this WAN interface.",
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(
+						regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`),
+						"must be a colon-delimited MAC address",
+					),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"mac_override_enabled": schema.BoolAttribute{
 				Optional:            true,
 				Computed:            true,
@@ -1057,6 +1087,12 @@ func (r *wanResource) overlayConfig(
 	}
 	if !config.Enabled.IsNull() {
 		state.Enabled = plan.Enabled
+	}
+	if !config.MACOverride.IsNull() {
+		state.MACOverride = plan.MACOverride
+	}
+	if !config.MACOverrideEnabled.IsNull() {
+		state.MACOverrideEnabled = plan.MACOverrideEnabled
 	}
 	if !config.IPAliases.IsNull() {
 		state.IPAliases = plan.IPAliases
@@ -1334,6 +1370,9 @@ func (r *wanResource) applyPlanToState(
 	}
 	if !plan.SingleNetworkLAN.IsNull() && !plan.SingleNetworkLAN.IsUnknown() {
 		state.SingleNetworkLAN = plan.SingleNetworkLAN
+	}
+	if !plan.MACOverride.IsNull() && !plan.MACOverride.IsUnknown() {
+		state.MACOverride = plan.MACOverride
 	}
 	if !plan.MACOverrideEnabled.IsNull() && !plan.MACOverrideEnabled.IsUnknown() {
 		state.MACOverrideEnabled = plan.MACOverrideEnabled
@@ -1663,6 +1702,9 @@ func (r *wanResource) modelToNetwork(
 	if !model.SingleNetworkLAN.IsNull() && !model.SingleNetworkLAN.IsUnknown() {
 		network.SingleNetworkLan = model.SingleNetworkLAN.ValueStringPointer()
 	}
+	if !model.MACOverride.IsNull() && !model.MACOverride.IsUnknown() {
+		network.MACOverride = model.MACOverride.ValueString()
+	}
 	if !model.MACOverrideEnabled.IsNull() && !model.MACOverrideEnabled.IsUnknown() {
 		network.MACOverrideEnabled = model.MACOverrideEnabled.ValueBool()
 	}
@@ -1975,6 +2017,7 @@ func (r *wanResource) networkToModel(
 	model.SettingPreference = types.StringPointerValue(network.SettingPreference)
 	model.IPv6SettingPreference = types.StringPointerValue(network.IPV6SettingPreference)
 	model.SingleNetworkLAN = types.StringPointerValue(network.SingleNetworkLan)
+	model.MACOverride = util.StringValueOrNull(network.MACOverride)
 	model.MACOverrideEnabled = types.BoolValue(network.MACOverrideEnabled)
 	model.DsliteRemoteHost = types.StringPointerValue(network.WANDsliteRemoteHost)
 	model.DsliteRemoteHostAuto = types.BoolValue(network.WANDsliteRemoteHostAuto)

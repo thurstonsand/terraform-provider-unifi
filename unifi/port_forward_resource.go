@@ -28,9 +28,10 @@ import (
 )
 
 var (
-	_ resource.Resource                = &portForwardResource{}
-	_ resource.ResourceWithImportState = &portForwardResource{}
-	_ resource.ResourceWithIdentity    = &portForwardResource{}
+	_ resource.Resource                    = &portForwardResource{}
+	_ resource.ResourceWithImportState     = &portForwardResource{}
+	_ resource.ResourceWithIdentity        = &portForwardResource{}
+	_ resource.ResourceWithUpgradeIdentity = &portForwardResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -157,6 +158,7 @@ func (r *portForwardResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
@@ -166,6 +168,18 @@ func (r *portForwardResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *portForwardResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return portForwardIdentityModel{ID: id}
+	})
 }
 
 func (r *portForwardResource) Schema(

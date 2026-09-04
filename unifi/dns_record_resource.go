@@ -29,10 +29,11 @@ import (
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var (
-	_ resource.Resource                 = &dnsRecordFrameworkResource{}
-	_ resource.ResourceWithImportState  = &dnsRecordFrameworkResource{}
-	_ resource.ResourceWithIdentity     = &dnsRecordFrameworkResource{}
-	_ resource.ResourceWithUpgradeState = &dnsRecordFrameworkResource{}
+	_ resource.Resource                    = &dnsRecordFrameworkResource{}
+	_ resource.ResourceWithImportState     = &dnsRecordFrameworkResource{}
+	_ resource.ResourceWithIdentity        = &dnsRecordFrameworkResource{}
+	_ resource.ResourceWithUpgradeIdentity = &dnsRecordFrameworkResource{}
+	_ resource.ResourceWithUpgradeState    = &dnsRecordFrameworkResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -102,6 +103,7 @@ func (r *dnsRecordFrameworkResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		// The optional "site" attribute defaults to the provider site on
 		// import. Identities stored by older provider versions ({id} only)
 		// decode under this schema with site as null; they are passed
@@ -115,6 +117,18 @@ func (r *dnsRecordFrameworkResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *dnsRecordFrameworkResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return dnsRecordIdentityModel{ID: id}
+	})
 }
 
 func (r *dnsRecordFrameworkResource) Schema(

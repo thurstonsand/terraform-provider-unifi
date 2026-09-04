@@ -39,6 +39,7 @@ var (
 	_ resource.ResourceWithConfigValidators = &siteToSiteVPNResource{}
 	_ resource.ResourceWithImportState      = &siteToSiteVPNResource{}
 	_ resource.ResourceWithIdentity         = &siteToSiteVPNResource{}
+	_ resource.ResourceWithUpgradeIdentity  = &siteToSiteVPNResource{}
 	_ resource.ResourceWithUpgradeState     = &siteToSiteVPNResource{}
 )
 
@@ -124,6 +125,7 @@ func (r *siteToSiteVPNResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		// The optional "site" attribute defaults to the provider site on
 		// import. Identities stored by older provider versions ({id} only)
 		// decode under this schema with site as null; they are passed
@@ -137,6 +139,18 @@ func (r *siteToSiteVPNResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *siteToSiteVPNResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return siteToSiteVPNIdentityModel{ID: id}
+	})
 }
 
 func (r *siteToSiteVPNResource) Schema(

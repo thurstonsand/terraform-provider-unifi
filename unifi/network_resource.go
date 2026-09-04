@@ -38,11 +38,12 @@ import (
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var (
-	_ resource.Resource                 = &networkResource{}
-	_ resource.ResourceWithImportState  = &networkResource{}
-	_ resource.ResourceWithIdentity     = &networkResource{}
-	_ resource.ResourceWithModifyPlan   = &networkResource{}
-	_ resource.ResourceWithUpgradeState = &networkResource{}
+	_ resource.Resource                    = &networkResource{}
+	_ resource.ResourceWithImportState     = &networkResource{}
+	_ resource.ResourceWithIdentity        = &networkResource{}
+	_ resource.ResourceWithModifyPlan      = &networkResource{}
+	_ resource.ResourceWithUpgradeIdentity = &networkResource{}
+	_ resource.ResourceWithUpgradeState    = &networkResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -274,6 +275,7 @@ func (r *networkResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
@@ -283,6 +285,18 @@ func (r *networkResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *networkResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return networkIdentityModel{ID: id}
+	})
 }
 
 func (r *networkResource) Schema(

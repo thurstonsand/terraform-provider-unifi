@@ -25,9 +25,10 @@ import (
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var (
-	_ resource.Resource                = &apGroupResource{}
-	_ resource.ResourceWithImportState = &apGroupResource{}
-	_ resource.ResourceWithIdentity    = &apGroupResource{}
+	_ resource.Resource                    = &apGroupResource{}
+	_ resource.ResourceWithImportState     = &apGroupResource{}
+	_ resource.ResourceWithIdentity        = &apGroupResource{}
+	_ resource.ResourceWithUpgradeIdentity = &apGroupResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -96,6 +97,7 @@ func (r *apGroupResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
@@ -105,6 +107,18 @@ func (r *apGroupResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *apGroupResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return apGroupIdentityModel{ID: id}
+	})
 }
 
 func (r *apGroupResource) Schema(

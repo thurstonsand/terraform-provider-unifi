@@ -34,6 +34,7 @@ var (
 	_ resource.ResourceWithImportState      = &staticRouteFrameworkResource{}
 	_ resource.ResourceWithConfigValidators = &staticRouteFrameworkResource{}
 	_ resource.ResourceWithIdentity         = &staticRouteFrameworkResource{}
+	_ resource.ResourceWithUpgradeIdentity  = &staticRouteFrameworkResource{}
 )
 
 // Ensure provider defined types fully satisfy list interfaces.
@@ -104,6 +105,7 @@ func (r *staticRouteFrameworkResource) IdentitySchema(
 	resp *resource.IdentitySchemaResponse,
 ) {
 	resp.IdentitySchema = identityschema.Schema{
+		Version: identitySchemaVersion,
 		Attributes: map[string]identityschema.Attribute{
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
@@ -113,6 +115,18 @@ func (r *staticRouteFrameworkResource) IdentitySchema(
 			},
 		},
 	}
+}
+
+// UpgradeIdentity implements [resource.ResourceWithUpgradeIdentity].
+//
+// The v0 identity had no site; Read reads site from state and passes the
+// upgraded identity through unchanged.
+func (r *staticRouteFrameworkResource) UpgradeIdentity(
+	_ context.Context,
+) map[int64]resource.IdentityUpgrader {
+	return upgradeLegacyIDIdentity(func(id types.String) any {
+		return staticRouteIdentityModel{ID: id}
+	})
 }
 
 func (r *staticRouteFrameworkResource) Schema(

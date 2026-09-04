@@ -651,10 +651,13 @@ func Test_wanResource_Schema(t *testing.T) {
 		if resp.Diagnostics.HasError() {
 			t.Fatalf("Schema() returned errors: %v", resp.Diagnostics)
 		}
-		for _, key := range []string{"id", "name", "type"} {
+		for _, key := range []string{"id", "name", "type", "mac_override"} {
 			if _, ok := resp.Schema.Attributes[key]; !ok {
 				t.Errorf("Schema() missing attribute %q", key)
 			}
+		}
+		if !resp.Schema.Attributes["mac_override"].IsSensitive() {
+			t.Error("Schema() mac_override is not sensitive")
 		}
 	})
 }
@@ -751,7 +754,8 @@ func Test_wanResource_modelToNetwork(t *testing.T) {
 			SettingPreference:     types.StringNull(),
 			IPv6SettingPreference: types.StringNull(),
 			SingleNetworkLAN:      types.StringNull(),
-			MACOverrideEnabled:    types.BoolNull(),
+			MACOverride:           types.StringValue("02:00:00:00:00:01"),
+			MACOverrideEnabled:    types.BoolValue(true),
 			DsliteRemoteHost:      types.StringNull(),
 			DsliteRemoteHostAuto:  types.BoolNull(),
 		}
@@ -774,6 +778,9 @@ func Test_wanResource_modelToNetwork(t *testing.T) {
 		if !got.Enabled {
 			t.Error("expected Enabled=true")
 		}
+		if got.MACOverride != "02:00:00:00:00:01" || !got.MACOverrideEnabled {
+			t.Error("expected enabled MAC override to round-trip to the API model")
+		}
 	})
 }
 
@@ -784,11 +791,13 @@ func Test_wanResource_networkToModel(t *testing.T) {
 		wanType := "dhcp"
 		name := "test-wan"
 		network := &unifi.Network{
-			ID:      "abc123",
-			Name:    &name,
-			Purpose: "wan",
-			WANType: &wanType,
-			Enabled: true,
+			ID:                 "abc123",
+			Name:               &name,
+			Purpose:            "wan",
+			WANType:            &wanType,
+			Enabled:            true,
+			MACOverride:        "02:00:00:00:00:01",
+			MACOverrideEnabled: true,
 		}
 		model := &wanResourceModel{}
 		applyWANDefaults(model)
@@ -807,6 +816,12 @@ func Test_wanResource_networkToModel(t *testing.T) {
 		}
 		if model.Type.ValueString() != "dhcp" {
 			t.Errorf("expected Type=dhcp, got %v", model.Type.ValueString())
+		}
+		if model.MACOverride.ValueString() != "02:00:00:00:00:01" {
+			t.Error("expected MAC override to round-trip from the API model")
+		}
+		if !model.MACOverrideEnabled.ValueBool() {
+			t.Error("expected enabled MAC override to round-trip from the API model")
 		}
 	})
 }
