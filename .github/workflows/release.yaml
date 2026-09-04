@@ -8,8 +8,7 @@ on:
     inputs:
       tag:
         description: "Tag to release"
-        required: false
-        default: "v0.41.1"
+        required: true
 
 # Releases need permissions to read and write the repository contents.
 # GitHub considers creating releases and uploading assets as writing contents.
@@ -34,7 +33,7 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7.2.3
         with:
-          version: latest
+          version: "~> v2"
           args: release --parallelism 2 --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -116,8 +116,8 @@ func (r *apGroupResource) IdentitySchema(
 func (r *apGroupResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return apGroupIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return apGroupIdentityModel{ID: id, Site: site}
 	})
 }
 

@@ -48,12 +48,30 @@ func versionedIdentityResources() map[string]identityUpgradeResource {
 	}
 }
 
-// TestUpgradeLegacyIdentity runs each resource's version 0 upgrader over the
-// identity v0.55.0 stored, checking that the result fits the current identity
-// schema and keeps the id.
+// TestUpgradeLegacyIdentity runs each resource's version 0 upgrader over both
+// identity shapes that were written under that version: the bare id from
+// v0.55.0, and the id plus site that v0.56.0-ansiblonomicon.1 wrote before the
+// schema was versioned. The result has to fit the current identity schema, keep
+// the id, and carry a stored site through.
 func TestUpgradeLegacyIdentity(t *testing.T) {
 	ctx := context.Background()
-	const legacyID = "legacy-id"
+	const (
+		legacyID   = "legacy-id"
+		legacySite = "legacy-site"
+	)
+
+	payloads := []struct {
+		name     string
+		json     string
+		wantSite string
+	}{
+		{name: "id only", json: `{"id":"` + legacyID + `"}`},
+		{
+			name:     "id and site",
+			json:     `{"id":"` + legacyID + `","site":"` + legacySite + `"}`,
+			wantSite: legacySite,
+		},
+	}
 
 	for name, r := range versionedIdentityResources() {
 		t.Run(name, func(t *testing.T) {
@@ -73,64 +91,80 @@ func TestUpgradeLegacyIdentity(t *testing.T) {
 				t.Fatal("upgrader has no prior schema")
 			}
 
-			priorType := upgrader.PriorSchema.Type().TerraformType(ctx)
-			priorRaw, err := (&tfprotov6.RawState{
-				JSON: []byte(`{"id":"` + legacyID + `"}`),
-			}).Unmarshal(priorType)
-			if err != nil {
-				t.Fatalf("decoding legacy identity against prior schema: %v", err)
-			}
+			for _, payload := range payloads {
+				t.Run(payload.name, func(t *testing.T) {
+					priorType := upgrader.PriorSchema.Type().TerraformType(ctx)
+					priorRaw, err := (&tfprotov6.RawState{JSON: []byte(payload.json)}).
+						Unmarshal(priorType)
+					if err != nil {
+						t.Fatalf("decoding legacy identity against prior schema: %v", err)
+					}
 
-			req := fwresource.UpgradeIdentityRequest{
-				Identity: &tfsdk.ResourceIdentity{
-					Raw:    priorRaw,
-					Schema: *upgrader.PriorSchema,
-				},
-			}
-			resp := fwresource.UpgradeIdentityResponse{
-				Identity: &tfsdk.ResourceIdentity{
-					Schema: schemaResp.IdentitySchema,
-				},
-			}
+					req := fwresource.UpgradeIdentityRequest{
+						Identity: &tfsdk.ResourceIdentity{
+							Raw:    priorRaw,
+							Schema: *upgrader.PriorSchema,
+						},
+					}
+					resp := fwresource.UpgradeIdentityResponse{
+						Identity: &tfsdk.ResourceIdentity{
+							Schema: schemaResp.IdentitySchema,
+						},
+					}
 
-			upgrader.IdentityUpgrader(ctx, req, &resp)
+					upgrader.IdentityUpgrader(ctx, req, &resp)
 
-			if resp.Diagnostics.HasError() {
-				t.Fatalf("upgrading identity: %v", resp.Diagnostics)
-			}
-			currentType := schemaResp.IdentitySchema.Type().TerraformType(ctx)
-			if !resp.Identity.Raw.Type().Equal(currentType) {
-				t.Fatalf(
-					"upgraded identity type = %s, want %s",
-					resp.Identity.Raw.Type(),
-					currentType,
-				)
-			}
+					if resp.Diagnostics.HasError() {
+						t.Fatalf("upgrading identity: %v", resp.Diagnostics)
+					}
+					currentType := schemaResp.IdentitySchema.Type().TerraformType(ctx)
+					if !resp.Identity.Raw.Type().Equal(currentType) {
+						t.Fatalf(
+							"upgraded identity type = %s, want %s",
+							resp.Identity.Raw.Type(),
+							currentType,
+						)
+					}
 
-			attrs := identityAttributes(t, resp.Identity.Raw)
-			if _, hasID := schemaResp.IdentitySchema.Attributes["id"]; hasID {
-				var got string
-				if err := attrs["id"].As(&got); err != nil {
-					t.Fatalf("reading upgraded id: %v", err)
-				}
-				if got != legacyID {
-					t.Errorf("upgraded id = %q, want %q", got, legacyID)
-				}
-			}
+					attrs := identityAttributes(t, resp.Identity.Raw)
+					if _, hasID := schemaResp.IdentitySchema.Attributes["id"]; hasID {
+						var got string
+						if err := attrs["id"].As(&got); err != nil {
+							t.Fatalf("reading upgraded id: %v", err)
+						}
+						if got != legacyID {
+							t.Errorf("upgraded id = %q, want %q", got, legacyID)
+						}
+					}
 
-			for attr, value := range attrs {
-				if attr == "id" {
-					continue
-				}
-				if !value.IsNull() {
-					t.Errorf(
-						"upgraded identity attribute %q = %s, want null: "+
-							"Read fills it from state, and it can only do that while the "+
-							"attribute is null",
-						attr,
-						value,
-					)
-				}
+					if site, hasSite := attrs["site"]; hasSite && payload.wantSite != "" {
+						var got string
+						if err := site.As(&got); err != nil {
+							t.Fatalf("reading upgraded site: %v", err)
+						}
+						if got != payload.wantSite {
+							t.Errorf("upgraded site = %q, want %q", got, payload.wantSite)
+						}
+					}
+
+					for attr, value := range attrs {
+						if attr == "id" {
+							continue
+						}
+						if attr == "site" && payload.wantSite != "" {
+							continue
+						}
+						if !value.IsNull() {
+							t.Errorf(
+								"upgraded identity attribute %q = %s, want null: "+
+									"Read fills it from state, and it can only do that while the "+
+									"attribute is null",
+								attr,
+								value,
+							)
+						}
+					}
+				})
 			}
 		})
 	}

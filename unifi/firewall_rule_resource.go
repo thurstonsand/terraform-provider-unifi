@@ -140,8 +140,8 @@ func (r *firewallRuleResource) IdentitySchema(
 func (r *firewallRuleResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return firewallRuleIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return firewallRuleIdentityModel{ID: id, Site: site}
 	})
 }
 

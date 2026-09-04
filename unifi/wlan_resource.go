@@ -215,8 +215,8 @@ func (r *wlanFrameworkResource) IdentitySchema(
 func (r *wlanFrameworkResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return wlanIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return wlanIdentityModel{ID: id, Site: site}
 	})
 }
 

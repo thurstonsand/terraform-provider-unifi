@@ -287,7 +287,7 @@ func (r *deviceResource) IdentitySchema(
 func (r *deviceResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(types.String) any {
+	return upgradeLegacyIDIdentity(func(_, _ types.String) any {
 		return deviceIdentityModel{}
 	})
 }

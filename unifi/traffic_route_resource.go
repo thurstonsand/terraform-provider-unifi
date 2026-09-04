@@ -190,8 +190,8 @@ func (r *trafficRouteResource) IdentitySchema(
 func (r *trafficRouteResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return trafficRouteIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return trafficRouteIdentityModel{ID: id, Site: site}
 	})
 }
 

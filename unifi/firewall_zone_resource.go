@@ -110,8 +110,8 @@ func (r *firewallZoneResource) IdentitySchema(
 func (r *firewallZoneResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return firewallZoneIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return firewallZoneIdentityModel{ID: id, Site: site}
 	})
 }
 

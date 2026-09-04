@@ -20,10 +20,14 @@ import (
 // UpgradeIdentity first.
 const identitySchemaVersion = 1
 
-// legacyIDIdentityModel is the v0.55.0 identity of nearly every resource: the
-// bare object id.
+// legacyIDIdentityModel is the version 0 identity of nearly every resource: the
+// object id, and a site that may or may not be there. v0.55.0 wrote the id
+// alone; v0.56.0-ansiblonomicon.1 added site while the schema was still
+// unversioned, so both shapes exist in the wild under version 0 and the prior
+// schema has to decode either one.
 type legacyIDIdentityModel struct {
-	ID types.String `tfsdk:"id"`
+	ID   types.String `tfsdk:"id"`
+	Site types.String `tfsdk:"site"`
 }
 
 // legacyIDIdentitySchema describes [legacyIDIdentityModel] so the framework can
@@ -34,20 +38,24 @@ func legacyIDIdentitySchema() *identityschema.Schema {
 			"id": identityschema.StringAttribute{
 				RequiredForImport: true,
 			},
+			"site": identityschema.StringAttribute{
+				OptionalForImport: true,
+			},
 		},
 	}
 }
 
 // upgradeLegacyIDIdentity builds the version 0 to 1 identity upgrade for
-// resources whose v0.55.0 identity held only the object id. newIdentity maps
-// that id onto the resource's current identity model.
+// resources whose version 0 identity was keyed on the object id. newIdentity
+// maps that id, and the site if the stored identity carried one, onto the
+// resource's current identity model.
 //
-// Attributes the v0 identity never stored stay null. Read then takes its lookup
-// values from ordinary state, which still carries site and mac, and must return
-// the upgraded identity unchanged: the framework rejects any Read that alters
-// an identity unless every attribute of it is null.
+// Attributes the stored identity never held stay null. Read then takes its
+// lookup values from ordinary state, which still carries site and mac, and must
+// return the upgraded identity unchanged: the framework rejects any Read that
+// alters an identity unless every attribute of it is null.
 func upgradeLegacyIDIdentity(
-	newIdentity func(id types.String) any,
+	newIdentity func(id, site types.String) any,
 ) map[int64]resource.IdentityUpgrader {
 	return map[int64]resource.IdentityUpgrader{
 		0: {
@@ -63,7 +71,7 @@ func upgradeLegacyIDIdentity(
 					return
 				}
 
-				resp.Diagnostics.Append(resp.Identity.Set(ctx, newIdentity(prior.ID))...)
+				resp.Diagnostics.Append(resp.Identity.Set(ctx, newIdentity(prior.ID, prior.Site))...)
 			},
 		},
 	}

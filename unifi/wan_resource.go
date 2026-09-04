@@ -336,8 +336,8 @@ func (r *wanResource) IdentitySchema(
 func (r *wanResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return wanIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return wanIdentityModel{ID: id, Site: site}
 	})
 }
 
@@ -808,18 +808,14 @@ func (r *wanResource) Schema(
 				},
 			},
 			"mac_override": schema.StringAttribute{
-				Optional:            true,
-				Computed:            true,
-				Sensitive:           true,
-				MarkdownDescription: "MAC address presented by this WAN interface.",
+				Optional:  true,
+				Sensitive: true,
+				MarkdownDescription: "MAC address presented by this WAN interface. " +
+					"Configuration is authoritative: removing the attribute clears the " +
+					"clone on the controller, so an imported WAN whose MAC was set " +
+					"outside Terraform must declare it here to keep it.",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(
-						regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`),
-						"must be a colon-delimited MAC address",
-					),
-				},
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
+					validators.SensitiveMACAddressValidator(),
 				},
 			},
 			"mac_override_enabled": schema.BoolAttribute{
@@ -827,7 +823,7 @@ func (r *wanResource) Schema(
 				Computed:            true,
 				MarkdownDescription: "Whether the WAN interface MAC address is overridden.",
 				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.UseStateForUnknown(),
+					macOverrideEnabledPlanModifier{},
 				},
 			},
 			"wan_dslite_remote_host": schema.StringAttribute{
@@ -1088,9 +1084,10 @@ func (r *wanResource) overlayConfig(
 	if !config.Enabled.IsNull() {
 		state.Enabled = plan.Enabled
 	}
-	if !config.MACOverride.IsNull() {
-		state.MACOverride = plan.MACOverride
-	}
+	// mac_override is Optional without Computed, so state must mirror the
+	// configuration even when it is null; a null here is a removal, not an
+	// absent opinion.
+	state.MACOverride = plan.MACOverride
 	if !config.MACOverrideEnabled.IsNull() {
 		state.MACOverrideEnabled = plan.MACOverrideEnabled
 	}
@@ -1371,9 +1368,7 @@ func (r *wanResource) applyPlanToState(
 	if !plan.SingleNetworkLAN.IsNull() && !plan.SingleNetworkLAN.IsUnknown() {
 		state.SingleNetworkLAN = plan.SingleNetworkLAN
 	}
-	if !plan.MACOverride.IsNull() && !plan.MACOverride.IsUnknown() {
-		state.MACOverride = plan.MACOverride
-	}
+	state.MACOverride = plan.MACOverride
 	if !plan.MACOverrideEnabled.IsNull() && !plan.MACOverrideEnabled.IsUnknown() {
 		state.MACOverrideEnabled = plan.MACOverrideEnabled
 	}
@@ -1702,12 +1697,13 @@ func (r *wanResource) modelToNetwork(
 	if !model.SingleNetworkLAN.IsNull() && !model.SingleNetworkLAN.IsUnknown() {
 		network.SingleNetworkLan = model.SingleNetworkLAN.ValueStringPointer()
 	}
-	if !model.MACOverride.IsNull() && !model.MACOverride.IsUnknown() {
-		network.MACOverride = model.MACOverride.ValueString()
-	}
-	if !model.MACOverrideEnabled.IsNull() && !model.MACOverrideEnabled.IsUnknown() {
-		network.MACOverrideEnabled = model.MACOverrideEnabled.ValueBool()
-	}
+	// Always sent: an empty mac_override is what tells the controller to drop a
+	// previously cloned address, so skipping the null case would make removal a
+	// silent no-op. The clone flag follows the address — enabling a clone with
+	// no MAC is not a state the controller can honor.
+	network.MACOverride = model.MACOverride.ValueString()
+	network.MACOverrideEnabled = model.MACOverrideEnabled.ValueBool() &&
+		network.MACOverride != ""
 	if !model.DsliteRemoteHost.IsNull() && !model.DsliteRemoteHost.IsUnknown() {
 		network.WANDsliteRemoteHost = model.DsliteRemoteHost.ValueStringPointer()
 	}

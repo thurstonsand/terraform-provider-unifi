@@ -111,8 +111,8 @@ func (r *firewallGroupResource) IdentitySchema(
 func (r *firewallGroupResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return firewallGroupIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return firewallGroupIdentityModel{ID: id, Site: site}
 	})
 }
 

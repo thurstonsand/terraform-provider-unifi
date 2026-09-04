@@ -97,6 +97,7 @@ resource "unifi_wan" "secondary" {
 - `ip_aliases` (List of String) IP aliases
 - `ipv6_setting_preference` (String) Whether WAN IPv6 settings are managed automatically by the controller or manually. Can be one of `auto` or `manual`.
 - `load_balance` (Attributes) Load balance configuration (see [below for nested schema](#nestedatt--load_balance))
+- `mac_override` (String, Sensitive) MAC address presented by this WAN interface. Configuration is authoritative: removing the attribute clears the clone on the controller, so an imported WAN whose MAC was set outside Terraform must declare it here to keep it.
 - `mac_override_enabled` (Boolean) Whether the WAN interface MAC address is overridden.
 - `networkgroup` (String) The WAN network group this interface belongs to (`WAN`, `WAN2`, …). The primary uplink is `WAN`; a secondary/SFP uplink is `WAN2`. Computed from the controller when unset (so an imported `WAN2` is preserved), defaulting to `WAN` on create. Required to manage multi-WAN (WAN2+) setups, where a hard-coded `WAN` collides with the primary (`api.err.WanConfigurationForNetworkGroupAlreadyExists`).
 - `provider_capabilities` (Attributes) WAN provider capabilities (line rate). Detected/populated by the controller; preserved when not set in config. (see [below for nested schema](#nestedatt--provider_capabilities))

@@ -129,8 +129,8 @@ func (r *radiusProfileResource) IdentitySchema(
 func (r *radiusProfileResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return radiusProfileIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return radiusProfileIdentityModel{ID: id, Site: site}
 	})
 }
 

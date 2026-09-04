@@ -184,8 +184,8 @@ func (r *vpnClientResource) IdentitySchema(
 func (r *vpnClientResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return vpnClientIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return vpnClientIdentityModel{ID: id, Site: site}
 	})
 }
 

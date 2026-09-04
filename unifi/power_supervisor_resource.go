@@ -135,8 +135,8 @@ func (r *powerSupervisorResource) IdentitySchema(
 func (r *powerSupervisorResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return powerSupervisorIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return powerSupervisorIdentityModel{ID: id, Site: site}
 	})
 }
 

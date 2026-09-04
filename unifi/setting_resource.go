@@ -2602,10 +2602,18 @@ func (r *settingResource) readSettings(
 			return
 		}
 
+		// A controller that has never been given an mDNS setting answers 404,
+		// as does one where the setting was deleted out of band. Read it as an
+		// empty setting the way Create and Update do, so the block comes back
+		// as drift the next apply repairs instead of a failed refresh.
 		_, mdnsSetting, err := ui.GetSetting[*settings.Mdns](r.client.ApiClient, ctx, site)
 		if err != nil {
-			diags.AddError("Error Reading mDNS Setting", err.Error())
-			return
+			var notFound *ui.NotFoundError
+			if !errors.As(err, &notFound) {
+				diags.AddError("Error Reading mDNS Setting", err.Error())
+				return
+			}
+			mdnsSetting = &settings.Mdns{}
 		}
 
 		mdnsModel := r.mdnsSettingToModel(ctx, mdnsSetting, &planMdns, diags)
@@ -3415,7 +3423,9 @@ func (r *settingResource) mdnsModelToSetting(
 	base *settings.Mdns,
 	diags *diag.Diagnostics,
 ) *settings.Mdns {
-	setting := base
+	// Copy: the caller's base is the setting just read from the controller, and
+	// overlaying onto it in place would rewrite that read.
+	setting := *base
 
 	if !model.Mode.IsNull() && !model.Mode.IsUnknown() {
 		setting.Mode = model.Mode.ValueString()
@@ -3460,7 +3470,7 @@ func (r *settingResource) mdnsModelToSetting(
 		setting.CustomServices = []settings.SettingMdnsCustomServices{}
 	}
 
-	return setting
+	return &setting
 }
 
 // mdnsSettingToModel mirrors the remote setting back into the block. Like the

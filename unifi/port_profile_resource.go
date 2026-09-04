@@ -156,8 +156,8 @@ func (r *portProfileResource) IdentitySchema(
 func (r *portProfileResource) UpgradeIdentity(
 	_ context.Context,
 ) map[int64]resource.IdentityUpgrader {
-	return upgradeLegacyIDIdentity(func(id types.String) any {
-		return portProfileIdentityModel{ID: id}
+	return upgradeLegacyIDIdentity(func(id, site types.String) any {
+		return portProfileIdentityModel{ID: id, Site: site}
 	})
 }
 

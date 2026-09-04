@@ -3,6 +3,8 @@ package unifi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/ubiquiti-community/go-unifi/unifi"
@@ -2469,5 +2472,139 @@ func TestMdnsExplicitEmptyListsClear(t *testing.T) {
 		if len(list.Elements()) != 0 {
 			t.Errorf("%s = %v, want empty", name, list)
 		}
+	}
+}
+
+// newMdnsMissingControllerClient answers every setting read with an empty data
+// array, which is how the SDK reports a setting the controller does not hold.
+func newMdnsMissingControllerClient(t *testing.T) *Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/manage", http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "fake-session", Path: "/"})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":{"rc":"ok"},"data":[]}`))
+	})
+	mux.HandleFunc(
+		"/api/s/default/get/setting/mdns",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"meta":{"rc":"ok"},"data":[]}`))
+		},
+	)
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	apiClient, err := unifi.New(context.Background(), &unifi.Config{
+		BaseURL:  srv.URL,
+		Username: "admin",
+		Password: "admin",
+	})
+	if err != nil {
+		t.Fatalf("creating client against fake controller: %v", err)
+	}
+	return &Client{ApiClient: apiClient, Site: "default"}
+}
+
+// TestReadMdnsToleratesMissingSetting covers a site whose mdns setting was
+// removed out of band. Create and Update have always treated that as an empty
+// setting; a read that errored instead left the resource unrefreshable, so the
+// removal could not be repaired by the apply that would have restored it.
+func TestReadMdnsToleratesMissingSetting(t *testing.T) {
+	ctx := context.Background()
+	r := &settingResource{client: newMdnsMissingControllerClient(t)}
+
+	planMdns, d := types.ObjectValueFrom(ctx, mdnsAttrTypes, &settingMdnsModel{
+		Mode:                 types.StringValue("custom"),
+		EnabledFor:           types.StringNull(),
+		EnabledForNetworkIDs: types.ListNull(types.StringType),
+		PredefinedServices:   types.ListNull(types.StringType),
+		CustomServices: types.ListNull(
+			types.ObjectType{AttrTypes: mdnsCustomServiceAttrTypes},
+		),
+	})
+	if d.HasError() {
+		t.Fatalf("building the planned mdns block: %v", d)
+	}
+
+	data := &settingResourceModel{Mdns: planMdns}
+	var diags diag.Diagnostics
+	r.readSettings(ctx, "default", data, &diags)
+
+	if diags.HasError() {
+		t.Fatalf("readSettings on a missing mdns setting: %v", diags)
+	}
+	if data.Mdns.IsNull() {
+		t.Fatal("mdns block dropped from state; the removal has to surface as drift")
+	}
+
+	var got settingMdnsModel
+	if d := data.Mdns.As(ctx, &got, basetypes.ObjectAsOptions{}); d.HasError() {
+		t.Fatalf("decoding the refreshed mdns block: %v", d)
+	}
+	if got.Mode.ValueString() != "" {
+		t.Errorf("mode = %v, want the empty value the controller now reports", got.Mode)
+	}
+}
+
+// TestMdnsModelToSettingDoesNotMutateBase pins that the overlay copies. The
+// base is the setting just read from the controller, and callers compare
+// against it; writing through the pointer would rewrite that read.
+func TestMdnsModelToSettingDoesNotMutateBase(t *testing.T) {
+	ctx := context.Background()
+	var diags diag.Diagnostics
+	r := &settingResource{}
+
+	base := &settings.Mdns{
+		Mode:                 "all",
+		EnabledFor:           "all",
+		EnabledForNetworkIDs: []string{"net-lan"},
+		PredefinedServices: []settings.SettingMdnsPredefinedServices{
+			{Code: "homeKit"},
+		},
+	}
+	before := *base
+
+	model := &settingMdnsModel{
+		Mode:                 types.StringValue("custom"),
+		EnabledFor:           types.StringValue("some"),
+		EnabledForNetworkIDs: mdnsStringList(t, ctx, "net-iot"),
+		PredefinedServices:   mdnsStringList(t, ctx, "sonos"),
+		CustomServices: mdnsCustomServiceList(t, ctx, settingMdnsCustomServiceModel{
+			Name:    types.StringValue("printer"),
+			Address: types.StringValue("_ipp._tcp.local"),
+		}),
+	}
+
+	setting := r.mdnsModelToSetting(ctx, model, base, &diags)
+	if diags.HasError() {
+		t.Fatalf("modelToSetting: %v", diags)
+	}
+	if setting == base {
+		t.Fatal("modelToSetting returned the caller's setting")
+	}
+	if base.Mode != before.Mode || base.EnabledFor != before.EnabledFor {
+		t.Errorf("base mutated: %+v, was %+v", base, before)
+	}
+	if len(base.EnabledForNetworkIDs) != 1 || base.EnabledForNetworkIDs[0] != "net-lan" {
+		t.Errorf("base network ids mutated: %v", base.EnabledForNetworkIDs)
+	}
+	if len(base.PredefinedServices) != 1 || base.PredefinedServices[0].Code != "homeKit" {
+		t.Errorf("base predefined services mutated: %v", base.PredefinedServices)
+	}
+	if base.CustomServices != nil {
+		t.Errorf("base custom services mutated: %v", base.CustomServices)
+	}
+	if setting.Mode != "custom" || setting.EnabledFor != "some" {
+		t.Errorf("overlay did not apply: %+v", setting)
 	}
 }
