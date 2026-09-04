@@ -1,5 +1,7 @@
 # Unifi Terraform Provider (terraform-provider-unifi)
 
+This is Thurston Sandberg's permanent fork for controller fields used by [ansiblonomicon](https://github.com/thurstonsand/ansiblonomicon) that upstream does not expose. The `release` branch stays rebased directly on `ubiquiti-community/main`; `.agents/skills/rebase/SKILL.md` defines the maintenance and release procedure. GitHub Releases publish the platform binaries, and ansiblonomicon verifies and installs them through OpenTofu's implied filesystem mirror. This fork is not published to an OpenTofu or Terraform registry.
+
 [![Acceptance Tests](https://github.com/ubiquiti-community/terraform-provider-unifi/actions/workflows/acctest.yaml/badge.svg)](https://github.com/ubiquiti-community/terraform-provider-unifi/actions/workflows/acctest.yaml) [![codecov](https://codecov.io/github/ubiquiti-community/terraform-provider-unifi/graph/badge.svg?token=KVP7FS41IG)](https://codecov.io/github/ubiquiti-community/terraform-provider-unifi)
 
 > **Note**: You can't (for obvious reasons) configure your network while connected to something that may disconnect (like the WiFi). Use a hard-wired connection to your controller to use this provider.

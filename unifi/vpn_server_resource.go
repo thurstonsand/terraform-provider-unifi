@@ -860,14 +860,14 @@ func (r *vpnServerResource) modelToNetwork(
 				diags.Append(d...)
 				if !diags.HasError() {
 					if len(dnsServers) > 0 {
-						network.DHCPDDNS1 = dnsServers[0]
+						network.DHCPDDNS1 = util.Ptr(dnsServers[0])
 						// Default enabled to true when servers are specified
 						if dns.Enabled.IsNull() || dns.Enabled.IsUnknown() {
 							network.DHCPDDNSEnabled = true
 						}
 					}
 					if len(dnsServers) > 1 {
-						network.DHCPDDNS2 = dnsServers[1]
+						network.DHCPDDNS2 = util.Ptr(dnsServers[1])
 					}
 				}
 			}
@@ -982,13 +982,7 @@ func (r *vpnServerResource) networkToModel(
 	// Build DNS nested object
 	{
 		var dnsServersList types.List
-		var dnsServers []string
-		if network.DHCPDDNS1 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS1)
-		}
-		if network.DHCPDDNS2 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS2)
-		}
+		dnsServers := collectNonEmptyStringPointers(network.DHCPDDNS1, network.DHCPDDNS2)
 		if len(dnsServers) > 0 {
 			var d diag.Diagnostics
 			dnsServersList, d = types.ListValueFrom(ctx, types.StringType, dnsServers)

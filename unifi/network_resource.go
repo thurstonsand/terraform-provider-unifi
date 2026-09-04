@@ -1865,35 +1865,35 @@ func (r *networkResource) modelToNetwork(
 						}
 						switch i {
 						case 0:
-							network.DHCPDDNS1 = dns
+							network.DHCPDDNS1 = util.Ptr(dns)
 						case 1:
-							network.DHCPDDNS2 = dns
+							network.DHCPDDNS2 = util.Ptr(dns)
 						case 2:
-							network.DHCPDDNS3 = dns
+							network.DHCPDDNS3 = util.Ptr(dns)
 						case 3:
-							network.DHCPDDNS4 = dns
+							network.DHCPDDNS4 = util.Ptr(dns)
 						}
 					}
 					// Set remaining DNS servers to empty string
 					for i := len(dnsServers); i < 4; i++ {
 						switch i {
 						case 0:
-							network.DHCPDDNS1 = ""
+							network.DHCPDDNS1 = util.Ptr("")
 						case 1:
-							network.DHCPDDNS2 = ""
+							network.DHCPDDNS2 = util.Ptr("")
 						case 2:
-							network.DHCPDDNS3 = ""
+							network.DHCPDDNS3 = util.Ptr("")
 						case 3:
-							network.DHCPDDNS4 = ""
+							network.DHCPDDNS4 = util.Ptr("")
 						}
 					}
 				}
 			} else {
 				// Set all DNS servers to empty string when not configured
-				network.DHCPDDNS1 = ""
-				network.DHCPDDNS2 = ""
-				network.DHCPDDNS3 = ""
-				network.DHCPDDNS4 = ""
+				network.DHCPDDNS1 = util.Ptr("")
+				network.DHCPDDNS2 = util.Ptr("")
+				network.DHCPDDNS3 = util.Ptr("")
+				network.DHCPDDNS4 = util.Ptr("")
 			}
 		}
 	} else if !relayEnabled {
@@ -1916,10 +1916,10 @@ func (r *networkResource) modelToNetwork(
 		network.DHCPDWPAdUrl = util.Ptr("")
 		network.DHCPDTFTPServer = util.Ptr("")
 		network.DHCPDUnifiController = util.Ptr("")
-		network.DHCPDDNS1 = ""
-		network.DHCPDDNS2 = ""
-		network.DHCPDDNS3 = ""
-		network.DHCPDDNS4 = ""
+		network.DHCPDDNS1 = util.Ptr("")
+		network.DHCPDDNS2 = util.Ptr("")
+		network.DHCPDDNS3 = util.Ptr("")
+		network.DHCPDDNS4 = util.Ptr("")
 	}
 
 	// Handle DHCPv6 server configuration
@@ -2356,19 +2356,9 @@ func (r *networkResource) networkToModel(
 		diags.Append(d...)
 
 		// Build DNS servers list from DHCPDDNS1-4
-		var dnsServers []string
-		if network.DHCPDDNS1 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS1)
-		}
-		if network.DHCPDDNS2 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS2)
-		}
-		if network.DHCPDDNS3 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS3)
-		}
-		if network.DHCPDDNS4 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS4)
-		}
+		dnsServers := collectNonEmptyStringPointers(
+			network.DHCPDDNS1, network.DHCPDDNS2, network.DHCPDDNS3, network.DHCPDDNS4,
+		)
 
 		dnsServersList, d := stringListOrNull(ctx, dnsServers, previousDhcpServer.DnsServers)
 		diags.Append(d...)
