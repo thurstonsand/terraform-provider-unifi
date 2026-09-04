@@ -158,6 +158,28 @@ func ethernetIfnames(overrides []unifi.DeviceEthernetOverrides) []string {
 	return names
 }
 
+// refreshEthernetOverrideState resolves the ethernet_override state after a
+// read: a declared list is refreshed interface by interface, and a resource that
+// declares no blocks gets an empty list. Empty rather than null, because
+// Terraform renders a block-less configuration as an empty collection, and a
+// null in state would read as a difference on every plan.
+func refreshEthernetOverrideState(
+	ctx context.Context,
+	prior types.List,
+	live []unifi.DeviceEthernetOverrides,
+) (types.List, diag.Diagnostics) {
+	if prior.IsNull() || prior.IsUnknown() || len(prior.Elements()) == 0 {
+		return emptyEthernetOverrideList(), nil
+	}
+	return refreshEthernetOverrides(ctx, prior, live)
+}
+
+// emptyEthernetOverrideList is the value that says "this resource manages no
+// interfaces".
+func emptyEthernetOverrideList() types.List {
+	return types.ListValueMust(ethernetOverrideObjectType(), nil)
+}
+
 // refreshEthernetOverrides rebuilds the ethernet_override list from the API
 // response, keeping the interfaces the practitioner declared and refreshing
 // only their network group, so a controller-side reassignment shows up as
