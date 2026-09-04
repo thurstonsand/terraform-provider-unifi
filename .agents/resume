@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_root="$(dirname "$repo_root")"
+sdk_repo="$workspace_root/go-unifi"
+
+if [[ ! -d "$sdk_repo/.git" && -d "$workspace_root/repos/go-unifi/.git" ]]; then
+  ln -sfn "repos/go-unifi" "$sdk_repo"
+fi
+
+if [[ ! -d "$sdk_repo/.git" ]]; then
+  printf 'Missing %s; rerun .agents/setup\n' "$sdk_repo" >&2
+  exit 1
+fi
+
+for repo in "$repo_root" "$sdk_repo"; do
+  if ! git -C "$repo" remote get-url upstream >/dev/null 2>&1; then
+    printf '%s is missing its upstream remote; rerun .agents/setup\n' "$repo" >&2
+    exit 1
+  fi
+  git -C "$repo" remote set-url --push upstream DISABLED
+done
+
+command -v go >/dev/null
+printf 'UniFi fork workspace ready; upstream pushes disabled.\n'

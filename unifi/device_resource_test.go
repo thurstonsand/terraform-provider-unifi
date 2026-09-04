@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -2095,12 +2096,15 @@ func (m radioTableModel) IsUnknownAny() bool {
 // name). Both halves are exercised: unknowns stay off the wire, and the
 // controller-required name is echoed from the device.
 func TestAccDeviceFramework_radioTable(t *testing.T) {
+	preCheck(t)
+	mac := testAccConnectedAPMAC(t)
+
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { preCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: testAccDeviceFrameworkConfig_radioTable("6", "36"),
+				Config: testAccDeviceFrameworkConfig_radioTable(mac, "6", "36"),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("unifi_device.test_ap", "adopted", "true"),
 					resource.TestCheckResourceAttr("unifi_device.test_ap", "radio_table.#", "2"),
@@ -2131,7 +2135,7 @@ func TestAccDeviceFramework_radioTable(t *testing.T) {
 			},
 			{
 				// In-place channel change on the declared entries.
-				Config: testAccDeviceFrameworkConfig_radioTable("11", "40"),
+				Config: testAccDeviceFrameworkConfig_radioTable(mac, "11", "40"),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(
 						"unifi_device.test_ap",
@@ -2149,12 +2153,44 @@ func TestAccDeviceFramework_radioTable(t *testing.T) {
 	})
 }
 
-func testAccDeviceFrameworkConfig_radioTable(ngChannel, naChannel string) string {
+func testAccConnectedAPMAC(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	client, err := unifi.New(ctx, &unifi.Config{
+		BaseURL:       os.Getenv("UNIFI_API"),
+		Username:      os.Getenv("UNIFI_USERNAME"),
+		Password:      os.Getenv("UNIFI_PASSWORD"),
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("connect to acceptance controller: %s", err)
+	}
+	devices, err := client.ListDevice(ctx, "default")
+	if err != nil {
+		t.Fatalf("list acceptance controller devices: %s", err)
+	}
+	for _, device := range devices {
+		if device.Type != "uap" || !device.Adopted || device.State != unifi.DeviceStateConnected {
+			continue
+		}
+		namedRadios := map[string]bool{}
+		for _, radio := range device.RadioTable {
+			namedRadios[radio.Radio] = radio.Name != ""
+		}
+		if namedRadios["ng"] && namedRadios["na"] {
+			return device.MAC
+		}
+	}
+	t.Skip("acceptance controller has no connected access point with named ng and na radios")
+	return ""
+}
+
+func testAccDeviceFrameworkConfig_radioTable(mac, ngChannel, naChannel string) string {
 	return fmt.Sprintf(`
 resource "unifi_device" "test_ap" {
-	mac  = "00:15:6d:00:00:01"
+	mac  = %q
 	name = "Test AP Radio"
-	allow_adoption    = true
+	allow_adoption    = false
 	forget_on_destroy = false
 
 	radio_table = [
@@ -2172,5 +2208,5 @@ resource "unifi_device" "test_ap" {
 		},
 	]
 }
-`, ngChannel, naChannel)
+`, mac, ngChannel, naChannel)
 }

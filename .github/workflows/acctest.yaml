@@ -1,5 +1,6 @@
 name: Acceptance Tests
 on:
+  workflow_dispatch:
   release:
     types: [published]
   schedule:
@@ -39,18 +40,18 @@ jobs:
         with:
           timeout_minutes: 20
           max_attempts: 3
-          command: make testacc TEST_TIMEOUT=1h UNIFI_STDOUT=true UNIFI_VERSION=${{ matrix.unifi_download_url && 'beta' || matrix.unifi_version }} UNIFI_DOWNLOAD_URL=${{ matrix.unifi_download_url }}
-          retry_on: "timeout"
+          command: make testacc TEST_TIMEOUT=1h UNIFI_STDOUT=true UNIFI_VERSION=${{ matrix.unifi_version }}
+          retry_on: "any"
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.repository == 'ubiquiti-community/terraform-provider-unifi' }}
         uses: codecov/test-results-action@v1
         with:
           use_oidc: true
           flags: acceptance
 
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.repository == 'ubiquiti-community/terraform-provider-unifi' }}
         uses: codecov/codecov-action@v7
         with:
           use_oidc: true
