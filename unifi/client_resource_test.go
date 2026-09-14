@@ -2,7 +2,10 @@ package unifi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -21,6 +24,136 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfversion"
 	"github.com/ubiquiti-community/go-unifi/unifi"
 )
+
+func newClientBlockTestClient(
+	t *testing.T,
+	stamgrResponse string,
+	blocked bool,
+	commands *[]string,
+) *Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/":
+			http.Redirect(w, req, "/manage", http.StatusFound)
+		case "/api/login":
+			http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "fake-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"meta":{"rc":"ok"},"data":[]}`))
+		case "/api/s/default/cmd/stamgr":
+			var body struct {
+				Command string `json:"cmd"`
+				MAC     string `json:"mac"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Errorf("decoding stamgr request: %v", err)
+			}
+			if body.MAC != "02:00:00:de:ad:10" {
+				t.Errorf("stamgr mac = %q, want 02:00:00:de:ad:10", body.MAC)
+			}
+			*commands = append(*commands, body.Command)
+			_, _ = w.Write([]byte(stamgrResponse))
+		case "/api/s/default/rest/user/client-id":
+			_, _ = fmt.Fprintf(
+				w,
+				`{"meta":{"rc":"ok"},"data":[{"_id":"client-id","mac":"02:00:00:de:ad:10","blocked":%t}]}`,
+				blocked,
+			)
+		default:
+			_, _ = w.Write([]byte(`{"meta":{"rc":"ok"},"data":[]}`))
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	apiClient, err := unifi.New(context.Background(), &unifi.Config{
+		BaseURL:  srv.URL,
+		Username: "admin",
+		Password: "admin",
+	})
+	if err != nil {
+		t.Fatalf("creating client against fake controller: %v", err)
+	}
+
+	return &Client{ApiClient: apiClient, Site: "default"}
+}
+
+func TestClientResourceSetClientBlockedUsesMatchingStationCommand(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		blocked bool
+		command string
+	}{
+		{name: "block", blocked: true, command: "block-sta"},
+		{name: "unblock", blocked: false, command: "unblock-sta"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			commands := []string{}
+			r := &clientResource{client: newClientBlockTestClient(
+				t,
+				`{"meta":{"rc":"ok"},"data":[{"_id":"client-id"}]}`,
+				test.blocked,
+				&commands,
+			)}
+			client := &unifi.Client{ID: "client-id", MAC: "02:00:00:de:ad:10"}
+
+			got, err := r.setClientBlocked(context.Background(), "default", client, test.blocked)
+			if err != nil {
+				t.Fatalf("setClientBlocked: %v", err)
+			}
+			if !reflect.DeepEqual(commands, []string{test.command}) {
+				t.Errorf("commands = %v, want [%s]", commands, test.command)
+			}
+			if clientBlocked(got) != test.blocked {
+				t.Errorf("read-back blocked = %t, want %t", clientBlocked(got), test.blocked)
+			}
+		})
+	}
+}
+
+func TestClientResourceAdoptingExistingClientReconcilesBlocked(t *testing.T) {
+	commands := []string{}
+	r := &clientResource{client: newClientBlockTestClient(
+		t,
+		`{"meta":{"rc":"ok"},"data":[{"_id":"client-id"}]}`,
+		true,
+		&commands,
+	)}
+	blocked := true
+
+	got, err := r.reconcileAdoptedClientBlocked(
+		context.Background(),
+		"default",
+		&unifi.Client{ID: "client-id", MAC: "02:00:00:de:ad:10"},
+		&unifi.Client{ID: "client-id", MAC: "02:00:00:de:ad:10", Blocked: &blocked},
+		&unifi.Client{MAC: "02:00:00:de:ad:10", Blocked: &blocked},
+	)
+	if err != nil {
+		t.Fatalf("reconcileAdoptedClientBlocked: %v", err)
+	}
+	if !reflect.DeepEqual(commands, []string{"block-sta"}) {
+		t.Errorf("commands = %v, want [block-sta]", commands)
+	}
+	if !clientBlocked(got) {
+		t.Error("read-back blocked = false, want true")
+	}
+}
+
+func TestClientResourceSetClientBlockedRejectsNonOKResponse(t *testing.T) {
+	commands := []string{}
+	r := &clientResource{client: newClientBlockTestClient(
+		t,
+		`{"meta":{"rc":"error","msg":"station command rejected"},"data":[]}`,
+		true,
+		&commands,
+	)}
+	client := &unifi.Client{ID: "client-id", MAC: "02:00:00:de:ad:10"}
+
+	if _, err := r.setClientBlocked(context.Background(), "default", client, true); err == nil {
+		t.Fatal("setClientBlocked returned nil error for non-ok station-manager response")
+	}
+}
 
 // TestClientToModel_DefaultsWhenAPIOmitsFields proves the fix for the spurious
 // in-place diff on every create/import: when the controller omits blocked / groups /
