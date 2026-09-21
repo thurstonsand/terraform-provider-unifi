@@ -424,13 +424,12 @@ func (r *networkResource) Schema(
 				Default:             booldefault.StaticBool(false),
 			},
 			"multicast_dns": schema.BoolAttribute{
-				MarkdownDescription: "Specifies whether mDNS is enabled. This is " +
-					"read back from the controller rather than defaulted: some " +
-					"controllers (notably UniFi OS gateways) ignore `mdns_enabled` " +
-					"at create/update time and always store `false`, so forcing a " +
-					"`true` default produced a \"provider produced inconsistent " +
-					"result after apply\" error.",
-				Optional: true,
+				MarkdownDescription: "Whether the gateway's mDNS proxy reflects this " +
+					"network. Read-only: `mdns_enabled` on the network document is a " +
+					"projection that the controller rewrites, and writing it is " +
+					"accepted and then discarded. Membership is owned by " +
+					"`unifi_setting.site`'s `mdns.enabled_for_network_ids`; set it " +
+					"there and this attribute reports the result.",
 				Computed: true,
 				PlanModifiers: []planmodifier.Bool{
 					boolplanmodifier.UseStateForUnknown(),
@@ -2067,14 +2066,7 @@ func (r *networkResource) networkToModel(
 		model.AutoScale = previousModel.AutoScale
 		model.SettingPreference = previousModel.SettingPreference
 		model.InternetAccess = previousModel.InternetAccess
-		// multicast_dns uses UseStateForUnknown, so it may be unknown during
-		// Create. Resolve it from the API value (the controller does not honor
-		// mDNS for vlan-only networks, so this is effectively false).
-		if previousModel.MulticastDNS.IsUnknown() {
-			model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
-		} else {
-			model.MulticastDNS = previousModel.MulticastDNS
-		}
+		model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
 		// Preserve configured values, but normalize import/read values that are
 		// absent because the controller omits fields irrelevant to vlan-only
 		// networks. Leaving these null/unknown would perpetually plan the schema
@@ -2166,18 +2158,7 @@ func (r *networkResource) networkToModel(
 		}
 		model.SettingPreference = types.StringPointerValue(network.SettingPreference)
 		model.InternetAccess = types.BoolValue(network.InternetAccessEnabled)
-		// Some controllers (notably UniFi OS gateways) ignore mdns_enabled
-		// per-network and always store false, so a configured `true` would fail
-		// the consistency check (#282; the vlan-only branch above already does
-		// this). Preserve the configured/known value; fall back to the
-		// controller's value only when it wasn't set by the user (unknown/null,
-		// e.g. on Read or List).
-		if previousModel != nil && !previousModel.MulticastDNS.IsNull() &&
-			!previousModel.MulticastDNS.IsUnknown() {
-			model.MulticastDNS = previousModel.MulticastDNS
-		} else {
-			model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
-		}
+		model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
 		// UniFi omits these fields when they have their implicit controller defaults.
 		// Normalize the omitted values to the provider schema defaults so an imported
 		// network does not perpetually plan null -> default/none changes (#414).

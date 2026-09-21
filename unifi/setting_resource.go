@@ -1761,6 +1761,13 @@ func (r *settingResource) Create(
 			resp.Diagnostics.AddError("Error Creating mDNS Setting", err.Error())
 			return
 		}
+
+		// UpdateSetting persists mode and the service lists but discards
+		// membership, so write that through the v2 config.
+		r.writeMdnsMembership(ctx, site, &mdns, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 	}
 
 	// Read back the settings
@@ -2112,6 +2119,13 @@ func (r *settingResource) Update(
 		}
 		if err := r.client.UpdateSetting(ctx, site, setting); err != nil {
 			resp.Diagnostics.AddError("Error Updating mDNS Setting", err.Error())
+			return
+		}
+
+		// UpdateSetting persists mode and the service lists but discards
+		// membership, so write that through the v2 config.
+		r.writeMdnsMembership(ctx, site, &mdns, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
 			return
 		}
 	}
@@ -3410,6 +3424,39 @@ func alignToPlanOrder[T any](planKeys []string, remote []T, key func(T) string) 
 		aligned = append(aligned, remaining[k]...)
 	}
 	return aligned
+}
+
+// writeMdnsMembership writes mDNS membership through the v2 global network
+// config, which is the only endpoint that persists it.
+//
+// The legacy setting document and each network's mdns_enabled are read-only
+// projections that the controller rewrites from this object. UpdateSetting
+// accepts enabled_for_network_ids with rc "ok" and then discards it -- the UI
+// itself issues that same legacy call and gets the unchanged list back -- so
+// mode and the service lists go through UpdateSetting while membership comes
+// here. The endpoint merges partial bodies, leaving the IGMP and IPv6 members
+// of the same object untouched.
+func (r *settingResource) writeMdnsMembership(
+	ctx context.Context,
+	site string,
+	model *settingMdnsModel,
+	diags *diag.Diagnostics,
+) {
+	if model.EnabledFor.IsNull() || model.EnabledFor.IsUnknown() {
+		return
+	}
+
+	networkIDs := []string{}
+	if !model.EnabledForNetworkIDs.IsNull() && !model.EnabledForNetworkIDs.IsUnknown() {
+		diags.Append(model.EnabledForNetworkIDs.ElementsAs(ctx, &networkIDs, false)...)
+		if diags.HasError() {
+			return
+		}
+	}
+
+	if _, err := r.client.SetMdnsMembership(ctx, site, model.EnabledFor.ValueString(), networkIDs); err != nil {
+		diags.AddError("Error Writing mDNS Membership", err.Error())
+	}
 }
 
 // mdnsModelToSetting overlays the declared fields onto the current remote

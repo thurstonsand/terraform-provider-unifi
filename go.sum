@@ -515,8 +515,8 @@ github.com/testcontainers/testcontainers-go/modules/compose v0.44.0/go.mod h1:0d
 github.com/theupdateframework/go-tuf v0.7.0 h1:CqbQFrWo1ae3/I0UCblSbczevCCbS31Qvs5LdxRWqRI=
 github.com/theupdateframework/go-tuf/v2 v2.4.2 h1:w7976/W8uTwlsegP5nRymlpjPgrwSh+AXUf85is6nJk=
 github.com/theupdateframework/go-tuf/v2 v2.4.2/go.mod h1:JqBrIUnNLAaNq/8GmBcEMFWfAFBbqp/MkJEJseXKbks=
-github.com/thurstonsand/go-unifi v1.34.1-0.20260914220213-7ef7ef6058b2 h1:fIO46Eo3hS2NzCEAUSpmqDWxeD8GOPSHJY8c8haVN7c=
-github.com/thurstonsand/go-unifi v1.34.1-0.20260914220213-7ef7ef6058b2/go.mod h1:Nnp+DsBAf+80/5BZnN7Id0t5HUuigZ+rwGlXRGrYkTM=
+github.com/thurstonsand/go-unifi v1.34.1-0.20260921091818-69e754b9739b h1:Wyun6AZ5OOWdTdH6isCjKGJE8SQ37aNLQm0awbeCLAM=
+github.com/thurstonsand/go-unifi v1.34.1-0.20260921091818-69e754b9739b/go.mod h1:Nnp+DsBAf+80/5BZnN7Id0t5HUuigZ+rwGlXRGrYkTM=
 github.com/tilt-dev/fsnotify v1.4.8-0.20220602155310-fff9c274a375 h1:QB54BJwA6x8QU9nHY3xJSZR2kX9bgpZekRKGkLTmEXA=
 github.com/tilt-dev/fsnotify v1.4.8-0.20220602155310-fff9c274a375/go.mod h1:xRroudyp5iVtxKqZCrA6n2TLFRBf8bmnjr1UD4x+z7g=
 github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRUgPQU=
