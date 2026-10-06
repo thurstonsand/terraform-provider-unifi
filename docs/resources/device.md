@@ -70,6 +70,7 @@ resource "unifi_device" "us_24_poe" {
 - `bandsteering_mode` (String) Band steering mode; valid values are `off`, `equal`, and `prefer_5g`.
 - `config_network` (Attributes) Network configuration for the device. (see [below for nested schema](#nestedatt--config_network))
 - `disabled` (Boolean) Specifies whether this device should be disabled.
+- `ethernet_override` (Block List) Assigns a physical interface of a gateway (UDM/UXG) to a network group, which is how a port is made a WAN, a WAN2, or a LAN port. Only the interfaces you declare are managed: the provider overlays them onto the device's current `ethernet_overrides` list, so undeclared interfaces keep their existing assignment and their other settings. Declaring no block at all leaves the whole list unmanaged, and removing every block relinquishes ownership without resetting anything on the controller. (see [below for nested schema](#nestedblock--ethernet_override))
 - `flowctrl_enabled` (Boolean) Enable flow control.
 - `forget_on_destroy` (Boolean) Specifies whether this resource should tell the controller to forget the device on destroy.
 - `jumboframe_enabled` (Boolean) Enable jumbo frames.
@@ -88,8 +89,6 @@ resource "unifi_device" "us_24_poe" {
 - `mgmt_network_id` (String) Management network ID. The network this device uses for its own management traffic (the UI's Network Override). When set, the device tags its management onto this network's VLAN, so that VLAN must already be tagged on the device's upstream switch port(s) before this attribute is applied. Otherwise the device loses its management path, drops off, and the apply fails with an inconsistent-result error. Apply in two steps: tag the VLAN on the uplink (a port_override tagged_networkconf_ids entry) first, then set mgmt_network_id. Leave unset to manage on the uplink's native (untagged) network.
 - `name` (String) The name of the device.
 - `outdoor_mode_override` (String) Outdoor mode override; valid values are `default`, `on`, and `off`.
-- `outlet_enabled` (Boolean) Enable outlet control.
-- `outlet_overrides` (Attributes List) Outlet configuration overrides. (see [below for nested schema](#nestedatt--outlet_overrides))
 - `poe_mode` (String) PoE mode; valid values are `auto`, `pasv24`, `passthrough`, and `off`.
 - `port_override` (Block Set) Per-port settings overrides, applied only to the ports you declare. Ports without a `port_override` block keep their existing controller-side configuration — the provider merges your declared ports (by `index`) into the device's current overrides rather than replacing the whole set. Removing a block stops managing that port but does not reset it; clear a port by overriding it back to the defaults instead. (see [below for nested schema](#nestedblock--port_override))
 - `radio_table` (Attributes List) Radio configuration table. (see [below for nested schema](#nestedatt--radio_table))
@@ -106,6 +105,8 @@ resource "unifi_device" "us_24_poe" {
 - `adopted` (Boolean) Whether the device is adopted.
 - `id` (String) The ID of the device.
 - `model` (String) Device model.
+- `outlet_enabled` (Boolean) Whether the device's outlet control is enabled, as reported by the controller. Read-only: the provider observes outlet state and never writes it, so a PDU's relays cannot be switched from Terraform.
+- `outlet_overrides` (Attributes List) The device's per-outlet configuration, as reported by the controller. Read-only: outlets carry live equipment, so the provider observes them and never writes a relay state or power-cycle change. (see [below for nested schema](#nestedatt--outlet_overrides))
 - `state` (Number) Device state.
 - `type` (String) Device type.
 
@@ -124,18 +125,13 @@ Optional:
 - `type` (String) Network configuration type (dhcp or static).
 
 
-<a id="nestedatt--outlet_overrides"></a>
-### Nested Schema for `outlet_overrides`
+<a id="nestedblock--ethernet_override"></a>
+### Nested Schema for `ethernet_override`
 
 Required:
 
-- `index` (Number) Outlet index.
-
-Optional:
-
-- `cycle_enabled` (Boolean) Enable power cycle.
-- `name` (String) Outlet name.
-- `relay_state` (Boolean) Relay state (on/off).
+- `ifname` (String) Physical interface name, e.g. `eth8`. The interface must already exist on the device.
+- `network_group` (String) Network group the interface belongs to: `WAN`, `WAN2`-`WAN9`, `LAN`, `LAN2`-`LAN8`, or `MGMT`.
 
 
 <a id="nestedblock--port_override"></a>
@@ -228,3 +224,14 @@ Optional:
 - `delete` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours). Setting a timeout for a Delete operation is only applicable if changes are saved into state before the destroy operation occurs.
 - `read` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours). Read operations occur during any refresh or planning operation when refresh is enabled.
 - `update` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours).
+
+
+<a id="nestedatt--outlet_overrides"></a>
+### Nested Schema for `outlet_overrides`
+
+Read-Only:
+
+- `cycle_enabled` (Boolean) Whether the outlet's power cycle is enabled.
+- `index` (Number) Outlet index.
+- `name` (String) Outlet name.
+- `relay_state` (Boolean) Relay state (on/off).

@@ -248,6 +248,7 @@ type settingResourceModel struct {
 	Radius        types.Object   `tfsdk:"radius"`
 	USG           types.Object   `tfsdk:"usg"`
 	IgmpSnooping  types.Object   `tfsdk:"igmp_snooping"`
+	Mdns          types.Object   `tfsdk:"mdns"`
 	Timeouts      timeouts.Value `tfsdk:"timeouts"`
 }
 
@@ -258,6 +259,23 @@ type settingResourceModel struct {
 type settingIgmpSnoopingModel struct {
 	Enabled    types.Bool `tfsdk:"enabled"`
 	NetworkIDs types.List `tfsdk:"network_ids"`
+}
+
+// settingMdnsModel is the nested mdns block: the site-level multicast DNS
+// repeater: the global mode, per-network membership, and which services it
+// forwards. unifi_network's multicast_dns is a read-only reflection of that
+// membership.
+type settingMdnsModel struct {
+	Mode                 types.String `tfsdk:"mode"`
+	EnabledFor           types.String `tfsdk:"enabled_for"`
+	EnabledForNetworkIDs types.List   `tfsdk:"enabled_for_network_ids"`
+	PredefinedServices   types.List   `tfsdk:"predefined_services"`
+	CustomServices       types.List   `tfsdk:"custom_services"`
+}
+
+type settingMdnsCustomServiceModel struct {
+	Name    types.String `tfsdk:"name"`
+	Address types.String `tfsdk:"address"`
 }
 
 // Shared attribute-type maps for the doh/ips nested objects and lists. These
@@ -384,6 +402,19 @@ var (
 	igmpSnoopingAttrTypes = map[string]attr.Type{
 		"enabled":     types.BoolType,
 		"network_ids": types.ListType{ElemType: types.StringType},
+	}
+	mdnsCustomServiceAttrTypes = map[string]attr.Type{
+		"name":    types.StringType,
+		"address": types.StringType,
+	}
+	mdnsAttrTypes = map[string]attr.Type{
+		"mode":                    types.StringType,
+		"enabled_for":             types.StringType,
+		"enabled_for_network_ids": types.ListType{ElemType: types.StringType},
+		"predefined_services":     types.ListType{ElemType: types.StringType},
+		"custom_services": types.ListType{
+			ElemType: types.ObjectType{AttrTypes: mdnsCustomServiceAttrTypes},
+		},
 	}
 )
 
@@ -1299,6 +1330,68 @@ func (r *settingResource) Schema(
 					},
 				},
 			},
+			"mdns": schema.SingleNestedAttribute{
+				MarkdownDescription: "Site-level multicast DNS (Bonjour) repeater setting. This block controls the global mode, the networks the repeater bridges, and the forwarded services; `unifi_network.multicast_dns` reports the resulting per-network membership read-only. Fields not declared here are preserved across updates.",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"mode": schema.StringAttribute{
+						MarkdownDescription: "mDNS mode: `all`, `auto`, or `custom`. `custom` is what the UI writes when specific services are selected.",
+						Optional:            true,
+						Computed:            true,
+						Validators: []validator.String{
+							stringvalidator.OneOf("all", "auto", "custom"),
+						},
+					},
+					"enabled_for": schema.StringAttribute{
+						MarkdownDescription: "Scope of the repeater: `all` for every network, or `some` to limit it to `enabled_for_network_ids`.",
+						Optional:            true,
+						Computed:            true,
+						Validators: []validator.String{
+							stringvalidator.OneOf("all", "some"),
+						},
+					},
+					"enabled_for_network_ids": schema.ListAttribute{
+						MarkdownDescription: "IDs of the networks the repeater bridges when `enabled_for` is `some`.",
+						ElementType:         types.StringType,
+						Optional:            true,
+						Computed:            true,
+						PlanModifiers: []planmodifier.List{
+							listplanmodifier.UseStateForUnknown(),
+						},
+					},
+					"predefined_services": schema.ListAttribute{
+						MarkdownDescription: "Codes of the built-in services to forward, e.g. `apple_airPlay`, `homeKit`, `google_chromecast`. An empty list clears every predefined service.",
+						ElementType:         types.StringType,
+						Optional:            true,
+						Computed:            true,
+						PlanModifiers: []planmodifier.List{
+							listplanmodifier.UseStateForUnknown(),
+						},
+					},
+					"custom_services": schema.ListNestedAttribute{
+						MarkdownDescription: "Custom service records to forward. An empty list clears every custom service.",
+						Optional:            true,
+						Computed:            true,
+						PlanModifiers: []planmodifier.List{
+							listplanmodifier.UseStateForUnknown(),
+						},
+						NestedObject: schema.NestedAttributeObject{
+							Attributes: map[string]schema.Attribute{
+								"name": schema.StringAttribute{
+									MarkdownDescription: "Display name of the custom service.",
+									Optional:            true,
+									Computed:            true,
+								},
+								"address": schema.StringAttribute{
+									MarkdownDescription: "Service address, e.g. `_myservice._tcp.local`.",
+									Optional:            true,
+									Computed:            true,
+								},
+							},
+						},
+					},
+				},
+			},
 			"timeouts": timeouts.Attributes(
 				ctx,
 				timeouts.Opts{Create: true, Read: true, Update: true, Delete: true},
@@ -1641,6 +1734,42 @@ func (r *settingResource) Create(
 		}
 	}
 
+	if !data.Mdns.IsNull() && !data.Mdns.IsUnknown() {
+		var mdns settingMdnsModel
+		resp.Diagnostics.Append(data.Mdns.As(ctx, &mdns, basetypes.ObjectAsOptions{})...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		// Read the current remote setting as the base so options this block
+		// does not model keep their controller values.
+		_, currentMdns, err := ui.GetSetting[*settings.Mdns](r.client.ApiClient, ctx, site)
+		if err != nil {
+			var notFound *ui.NotFoundError
+			if !errors.As(err, &notFound) {
+				resp.Diagnostics.AddError("Error Reading mDNS Setting", err.Error())
+				return
+			}
+			currentMdns = &settings.Mdns{}
+		}
+
+		setting := r.mdnsModelToSetting(ctx, &mdns, currentMdns, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if err := r.client.UpdateSetting(ctx, site, setting); err != nil {
+			resp.Diagnostics.AddError("Error Creating mDNS Setting", err.Error())
+			return
+		}
+
+		// UpdateSetting persists mode and the service lists but discards
+		// membership, so write that through the v2 config.
+		r.writeMdnsMembership(ctx, site, &mdns, setting, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
 	// Read back the settings
 	r.readSettings(ctx, site, &data, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
@@ -1963,6 +2092,40 @@ func (r *settingResource) Update(
 		}
 		if err := r.client.UpdateSetting(ctx, site, setting); err != nil {
 			resp.Diagnostics.AddError("Error Updating IGMP Snooping Setting", err.Error())
+			return
+		}
+	}
+
+	if !plan.Mdns.IsNull() && !plan.Mdns.IsUnknown() {
+		var mdns settingMdnsModel
+		resp.Diagnostics.Append(plan.Mdns.As(ctx, &mdns, basetypes.ObjectAsOptions{})...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		_, currentMdns, err := ui.GetSetting[*settings.Mdns](r.client.ApiClient, ctx, site)
+		if err != nil {
+			var notFound *ui.NotFoundError
+			if !errors.As(err, &notFound) {
+				resp.Diagnostics.AddError("Error Reading mDNS Setting", err.Error())
+				return
+			}
+			currentMdns = &settings.Mdns{}
+		}
+
+		setting := r.mdnsModelToSetting(ctx, &mdns, currentMdns, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if err := r.client.UpdateSetting(ctx, site, setting); err != nil {
+			resp.Diagnostics.AddError("Error Updating mDNS Setting", err.Error())
+			return
+		}
+
+		// UpdateSetting persists mode and the service lists but discards
+		// membership, so write that through the v2 config.
+		r.writeMdnsMembership(ctx, site, &mdns, setting, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
 			return
 		}
 	}
@@ -2443,6 +2606,39 @@ func (r *settingResource) readSettings(
 		data.IgmpSnooping = objValue
 	} else {
 		data.IgmpSnooping = types.ObjectNull(igmpSnoopingAttrTypes)
+	}
+
+	// mDNS repeater (site-level)
+	if !data.Mdns.IsNull() && !data.Mdns.IsUnknown() {
+		var planMdns settingMdnsModel
+		diags.Append(data.Mdns.As(ctx, &planMdns, basetypes.ObjectAsOptions{})...)
+		if diags.HasError() {
+			return
+		}
+
+		// A controller that has never been given an mDNS setting answers 404,
+		// as does one where the setting was deleted out of band. Read it as an
+		// empty setting the way Create and Update do, so the block comes back
+		// as drift the next apply repairs instead of a failed refresh.
+		_, mdnsSetting, err := ui.GetSetting[*settings.Mdns](r.client.ApiClient, ctx, site)
+		if err != nil {
+			var notFound *ui.NotFoundError
+			if !errors.As(err, &notFound) {
+				diags.AddError("Error Reading mDNS Setting", err.Error())
+				return
+			}
+			mdnsSetting = &settings.Mdns{}
+		}
+
+		mdnsModel := r.mdnsSettingToModel(ctx, mdnsSetting, &planMdns, diags)
+		objValue, d := types.ObjectValueFrom(ctx, mdnsAttrTypes, mdnsModel)
+		diags.Append(d...)
+		if diags.HasError() {
+			return
+		}
+		data.Mdns = objValue
+	} else {
+		data.Mdns = types.ObjectNull(mdnsAttrTypes)
 	}
 }
 
@@ -3186,6 +3382,233 @@ func (r *settingResource) igmpSnoopingSettingToModel(
 	ids, d := types.ListValueFrom(ctx, types.StringType, setting.NetworkIDs)
 	diags.Append(d...)
 	model.NetworkIDs = ids
+	return model
+}
+
+// mDNS conversion functions.
+
+// mdnsCustomServiceKey identifies a custom service record by its wire content,
+// since the controller assigns no id to these entries.
+func mdnsCustomServiceKey(name, address string) string {
+	return name + "\x00" + address
+}
+
+// alignToPlanOrder reorders remote so entries the plan already lists keep the
+// plan's order, with everything else appended in the order the controller
+// returned it. The mDNS service and network lists come back in controller
+// order, which need not match the config; without this a config listing the
+// same entries in another order would produce a diff on every plan.
+func alignToPlanOrder[T any](planKeys []string, remote []T, key func(T) string) []T {
+	if len(planKeys) == 0 || len(remote) == 0 {
+		return remote
+	}
+
+	remaining := make(map[string][]T, len(remote))
+	remoteOrder := make([]string, 0, len(remote))
+	for _, item := range remote {
+		k := key(item)
+		if _, seen := remaining[k]; !seen {
+			remoteOrder = append(remoteOrder, k)
+		}
+		remaining[k] = append(remaining[k], item)
+	}
+
+	aligned := make([]T, 0, len(remote))
+	for _, k := range planKeys {
+		if items := remaining[k]; len(items) > 0 {
+			aligned = append(aligned, items[0])
+			remaining[k] = items[1:]
+		}
+	}
+	for _, k := range remoteOrder {
+		aligned = append(aligned, remaining[k]...)
+	}
+	return aligned
+}
+
+// writeMdnsMembership writes mDNS membership through the v2 global network
+// config, which is the only endpoint that persists it.
+//
+// The legacy setting document and each network's mdns_enabled are read-only
+// projections that the controller rewrites from this object. UpdateSetting
+// accepts enabled_for_network_ids with rc "ok" and then discards it -- the UI
+// itself issues that same legacy call and gets the unchanged list back -- so
+// mode and the service lists go through UpdateSetting while membership comes
+// here. The endpoint merges partial bodies, leaving the IGMP and IPv6 members
+// of the same object untouched.
+func (r *settingResource) writeMdnsMembership(
+	ctx context.Context,
+	site string,
+	model *settingMdnsModel,
+	setting *settings.Mdns,
+	diags *diag.Diagnostics,
+) {
+	managesScope := !model.EnabledFor.IsNull() && !model.EnabledFor.IsUnknown()
+	managesNetworkIDs := !model.EnabledForNetworkIDs.IsNull() &&
+		!model.EnabledForNetworkIDs.IsUnknown()
+	if !managesScope && !managesNetworkIDs {
+		return
+	}
+
+	if _, err := r.client.SetMdnsMembership(
+		ctx,
+		site,
+		setting.EnabledFor,
+		setting.EnabledForNetworkIDs,
+	); err != nil {
+		diags.AddError("Error Writing mDNS Membership", err.Error())
+	}
+}
+
+// mdnsModelToSetting overlays the declared fields onto the current remote
+// setting, so options the block does not model keep their controller values.
+// The list fields are normalized to non-nil slices: they are serialized even
+// when empty (that is how a service list is cleared), and a nil slice would go
+// out as JSON null.
+func (r *settingResource) mdnsModelToSetting(
+	ctx context.Context,
+	model *settingMdnsModel,
+	base *settings.Mdns,
+	diags *diag.Diagnostics,
+) *settings.Mdns {
+	// Copy: the caller's base is the setting just read from the controller, and
+	// overlaying onto it in place would rewrite that read.
+	setting := *base
+
+	if !model.Mode.IsNull() && !model.Mode.IsUnknown() {
+		setting.Mode = model.Mode.ValueString()
+	}
+	if !model.EnabledFor.IsNull() && !model.EnabledFor.IsUnknown() {
+		setting.EnabledFor = model.EnabledFor.ValueString()
+	}
+	if !model.EnabledForNetworkIDs.IsNull() && !model.EnabledForNetworkIDs.IsUnknown() {
+		var ids []string
+		diags.Append(model.EnabledForNetworkIDs.ElementsAs(ctx, &ids, false)...)
+		setting.EnabledForNetworkIDs = ids
+	}
+	if !model.PredefinedServices.IsNull() && !model.PredefinedServices.IsUnknown() {
+		var codes []string
+		diags.Append(model.PredefinedServices.ElementsAs(ctx, &codes, false)...)
+		services := make([]settings.SettingMdnsPredefinedServices, 0, len(codes))
+		for _, code := range codes {
+			services = append(services, settings.SettingMdnsPredefinedServices{Code: code})
+		}
+		setting.PredefinedServices = services
+	}
+	if !model.CustomServices.IsNull() && !model.CustomServices.IsUnknown() {
+		var custom []settingMdnsCustomServiceModel
+		diags.Append(model.CustomServices.ElementsAs(ctx, &custom, false)...)
+		services := make([]settings.SettingMdnsCustomServices, 0, len(custom))
+		for _, c := range custom {
+			services = append(services, settings.SettingMdnsCustomServices{
+				Name:    c.Name.ValueString(),
+				Address: c.Address.ValueString(),
+			})
+		}
+		setting.CustomServices = services
+	}
+
+	if setting.EnabledForNetworkIDs == nil {
+		setting.EnabledForNetworkIDs = []string{}
+	}
+	if setting.PredefinedServices == nil {
+		setting.PredefinedServices = []settings.SettingMdnsPredefinedServices{}
+	}
+	if setting.CustomServices == nil {
+		setting.CustomServices = []settings.SettingMdnsCustomServices{}
+	}
+
+	return &setting
+}
+
+// mdnsSettingToModel mirrors the remote setting back into the block. Like the
+// DoH block, an attribute the config never declared stays null, while a
+// declared one mirrors the remote value — including an empty list, which must
+// not collapse to null or the apply trips the "inconsistent result" check.
+func (r *settingResource) mdnsSettingToModel(
+	ctx context.Context,
+	setting *settings.Mdns,
+	plan *settingMdnsModel,
+	diags *diag.Diagnostics,
+) *settingMdnsModel {
+	model := &settingMdnsModel{
+		Mode:       types.StringNull(),
+		EnabledFor: types.StringNull(),
+	}
+
+	if !plan.Mode.IsNull() && !plan.Mode.IsUnknown() {
+		model.Mode = util.StringValueOrNull(setting.Mode)
+	}
+	if !plan.EnabledFor.IsNull() && !plan.EnabledFor.IsUnknown() {
+		model.EnabledFor = util.StringValueOrNull(setting.EnabledFor)
+	}
+
+	if !plan.EnabledForNetworkIDs.IsNull() && !plan.EnabledForNetworkIDs.IsUnknown() {
+		var planIDs []string
+		diags.Append(plan.EnabledForNetworkIDs.ElementsAs(ctx, &planIDs, false)...)
+		ids := alignToPlanOrder(
+			planIDs,
+			setting.EnabledForNetworkIDs,
+			func(id string) string { return id },
+		)
+		listVal, d := types.ListValueFrom(ctx, types.StringType, ids)
+		diags.Append(d...)
+		model.EnabledForNetworkIDs = listVal
+	} else {
+		model.EnabledForNetworkIDs = types.ListNull(types.StringType)
+	}
+
+	if !plan.PredefinedServices.IsNull() && !plan.PredefinedServices.IsUnknown() {
+		var planCodes []string
+		diags.Append(plan.PredefinedServices.ElementsAs(ctx, &planCodes, false)...)
+		services := alignToPlanOrder(
+			planCodes,
+			setting.PredefinedServices,
+			func(s settings.SettingMdnsPredefinedServices) string { return s.Code },
+		)
+		codes := make([]string, 0, len(services))
+		for _, s := range services {
+			codes = append(codes, s.Code)
+		}
+		listVal, d := types.ListValueFrom(ctx, types.StringType, codes)
+		diags.Append(d...)
+		model.PredefinedServices = listVal
+	} else {
+		model.PredefinedServices = types.ListNull(types.StringType)
+	}
+
+	customServiceType := types.ObjectType{AttrTypes: mdnsCustomServiceAttrTypes}
+	if !plan.CustomServices.IsNull() && !plan.CustomServices.IsUnknown() {
+		var planCustom []settingMdnsCustomServiceModel
+		diags.Append(plan.CustomServices.ElementsAs(ctx, &planCustom, false)...)
+		planKeys := make([]string, 0, len(planCustom))
+		for _, c := range planCustom {
+			planKeys = append(
+				planKeys,
+				mdnsCustomServiceKey(c.Name.ValueString(), c.Address.ValueString()),
+			)
+		}
+		remote := alignToPlanOrder(
+			planKeys,
+			setting.CustomServices,
+			func(s settings.SettingMdnsCustomServices) string {
+				return mdnsCustomServiceKey(s.Name, s.Address)
+			},
+		)
+		custom := make([]settingMdnsCustomServiceModel, 0, len(remote))
+		for _, s := range remote {
+			custom = append(custom, settingMdnsCustomServiceModel{
+				Name:    types.StringValue(s.Name),
+				Address: types.StringValue(s.Address),
+			})
+		}
+		listVal, d := types.ListValueFrom(ctx, customServiceType, custom)
+		diags.Append(d...)
+		model.CustomServices = listVal
+	} else {
+		model.CustomServices = types.ListNull(customServiceType)
+	}
+
 	return model
 }
 

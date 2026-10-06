@@ -411,6 +411,7 @@ func (r *clientResource) Create(
 
 	// Create the Client
 	createdClient, err := r.client.CreateClient(ctx, site, client)
+	var adoptedClient *unifi.Client
 	if err != nil {
 		var apiErr *unifi.APIError
 		if !errors.As(err, &apiErr) || (apiErr.Message != "api.err.MacUsed" || !allowExisting) {
@@ -445,12 +446,23 @@ func (r *clientResource) Create(
 		} else {
 			createdClient = existingClient
 		}
+		adoptedClient = createdClient
 	}
 
 	createdClient, diags = r.reconcileCreatedClient(ctx, site, createdClient, client)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	if adoptedClient != nil {
+		createdClient, err = r.reconcileAdoptedClientBlocked(ctx, site, adoptedClient, createdClient, client)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error Updating Adopted Client Block State",
+				"Could not update adopted client block state: "+err.Error(),
+			)
+			return
+		}
 	}
 
 	// Convert response back to model
@@ -692,6 +704,16 @@ func (r *clientResource) Update(
 			if resp.Diagnostics.HasError() {
 				return
 			}
+			if state.Blocked.ValueBool() != plan.Blocked.ValueBool() {
+				createdClient, err = r.setClientBlocked(ctx, site, createdClient, plan.Blocked.ValueBool())
+				if err != nil {
+					resp.Diagnostics.AddError(
+						"Error Updating Recreated Client Block State",
+						"Could not update recreated client block state: "+err.Error(),
+					)
+					return
+				}
+			}
 
 			// Convert response back to model
 			diags = r.clientToModel(ctx, createdClient, &state, site)
@@ -738,8 +760,18 @@ func (r *clientResource) Update(
 		)
 		return
 	}
+	if state.Blocked.ValueBool() != plan.Blocked.ValueBool() {
+		updatedClient, err = r.setClientBlocked(ctx, site, updatedClient, plan.Blocked.ValueBool())
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error Updating Client Block State",
+				"Could not update client block state: "+err.Error(),
+			)
+			return
+		}
+	}
 
-	// Step 6: Convert the fetched client to state model
+	// Step 5: Convert the updated client to state model
 	diags = r.clientToModel(ctx, updatedClient, &state, site)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
@@ -756,6 +788,51 @@ func (r *clientResource) Update(
 
 	resp.Diagnostics.Append(resp.Identity.Set(ctx, identityModel)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+func clientBlocked(client *unifi.Client) bool {
+	return client.Blocked != nil && *client.Blocked
+}
+
+func (r *clientResource) reconcileAdoptedClientBlocked(
+	ctx context.Context,
+	site string,
+	adoptedClient *unifi.Client,
+	updatedClient *unifi.Client,
+	plannedClient *unifi.Client,
+) (*unifi.Client, error) {
+	if clientBlocked(adoptedClient) == clientBlocked(plannedClient) {
+		return updatedClient, nil
+	}
+
+	return r.setClientBlocked(ctx, site, updatedClient, clientBlocked(plannedClient))
+}
+
+func (r *clientResource) setClientBlocked(
+	ctx context.Context,
+	site string,
+	client *unifi.Client,
+	blocked bool,
+) (*unifi.Client, error) {
+	var err error
+	if blocked {
+		err = r.client.BlockClientByMAC(ctx, site, client.MAC)
+	} else {
+		err = r.client.UnblockClientByMAC(ctx, site, client.MAC)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	updatedClient, err := r.client.GetClient(ctx, site, client.ID)
+	if err != nil {
+		return nil, err
+	}
+	if clientBlocked(updatedClient) != blocked {
+		return nil, fmt.Errorf("controller reported blocked=%t after requesting blocked=%t", clientBlocked(updatedClient), blocked)
+	}
+
+	return updatedClient, nil
 }
 
 // applyPlanToState merges plan values into state, preserving state values where plan is null/unknown.
@@ -791,9 +868,6 @@ func (r *clientResource) applyPlanToState(
 	}
 	if !plan.Groups.IsNull() && !plan.Groups.IsUnknown() {
 		state.Groups = plan.Groups
-	}
-	if !plan.Blocked.IsNull() && !plan.Blocked.IsUnknown() {
-		state.Blocked = plan.Blocked
 	}
 	if !plan.LocalDNSRecord.IsNull() && !plan.LocalDNSRecord.IsUnknown() {
 		state.LocalDNSRecord = plan.LocalDNSRecord

@@ -1333,11 +1333,11 @@ func TestAccNetworkList_basic(t *testing.T) {
 	})
 }
 
-// Test_networkResource_networkToModel_multicastDNS guards #282: a corporate
-// network's multicast_dns is overridden to false server-side by some controllers
-// (UniFi OS gateways), so a user-configured true would fail the consistency
-// check. The configured/known value must be preserved; an unset (unknown) value
-// falls back to the controller's value.
+// Test_networkResource_networkToModel_multicastDNS guards the read-only
+// contract of multicast_dns: the controller rewrites mdns_enabled from the
+// membership owned by unifi_setting.site, so Read must report the controller's
+// value in both branches and never echo prior state (the old #282 behavior,
+// which hid discarded writes).
 func Test_networkResource_networkToModel_multicastDNS(t *testing.T) {
 	r := &networkResource{}
 	base := func() *networkResourceModel {
@@ -1353,41 +1353,43 @@ func Test_networkResource_networkToModel_multicastDNS(t *testing.T) {
 			IPv6Aliases: types.ListNull(types.StringType),
 		}
 	}
-	// Corporate network (not vlan-only); controller forces mdns false.
-	network := &unifi.Network{
-		ID:          "net-1",
-		Name:        strPtr("IoT"),
-		Purpose:     unifi.PurposeCorporate,
-		Enabled:     true,
-		IPSubnet:    strPtr("10.0.2.1/24"),
-		MdnsEnabled: false,
+	priors := []types.Bool{
+		types.BoolValue(true),
+		types.BoolValue(false),
+		types.BoolUnknown(),
+		types.BoolNull(),
 	}
 
-	t.Run("configured true is preserved", func(t *testing.T) {
-		prev := base()
-		prev.MulticastDNS = types.BoolValue(true)
-		var model networkResourceModel
-		d := r.networkToModel(context.Background(), network, &model, "default", prev)
-		if d.HasError() {
-			t.Fatalf("networkToModel: %v", d)
-		}
-		if !model.MulticastDNS.ValueBool() {
-			t.Errorf("configured multicast_dns=true not preserved: %v", model.MulticastDNS)
-		}
-	})
+	for _, purpose := range []string{unifi.PurposeCorporate, unifi.PurposeVLANOnly} {
+		for _, controller := range []bool{true, false} {
+			for _, prior := range priors {
+				t.Run(fmt.Sprintf("%s/controller=%t/prior=%v", purpose, controller, prior), func(t *testing.T) {
+					prev := base()
+					prev.MulticastDNS = prior
+					network := &unifi.Network{
+						ID:          "net-1",
+						Name:        strPtr("IoT"),
+						Purpose:     purpose,
+						Enabled:     true,
+						IPSubnet:    strPtr("10.0.2.1/24"),
+						MdnsEnabled: controller,
+					}
 
-	t.Run("unset falls back to controller value", func(t *testing.T) {
-		prev := base()
-		prev.MulticastDNS = types.BoolUnknown()
-		var model networkResourceModel
-		d := r.networkToModel(context.Background(), network, &model, "default", prev)
-		if d.HasError() {
-			t.Fatalf("networkToModel: %v", d)
+					var model networkResourceModel
+					d := r.networkToModel(context.Background(), network, &model, "default", prev)
+					if d.HasError() {
+						t.Fatalf("networkToModel: %v", d)
+					}
+					if model.MulticastDNS.IsNull() || model.MulticastDNS.IsUnknown() {
+						t.Fatalf("multicast_dns = %v, want a known controller value", model.MulticastDNS)
+					}
+					if got := model.MulticastDNS.ValueBool(); got != controller {
+						t.Errorf("multicast_dns = %t, want controller value %t", got, controller)
+					}
+				})
+			}
 		}
-		if model.MulticastDNS.ValueBool() {
-			t.Errorf("unset multicast_dns should reflect controller false, got true")
-		}
-	})
+	}
 }
 
 // Test_networkResource_networkToModel_ipAliases guards #413: ip_aliases must
@@ -2662,14 +2664,14 @@ func Test_preserveUnmanagedDhcpServer(t *testing.T) {
 		DHCPDStop:       strPtr("10.0.0.200"),
 		DHCPDLeaseTime:  func() *int64 { v := int64(3600); return &v }(),
 		DHCPDDNSEnabled: true,
-		DHCPDDNS1:       "10.0.0.53",
+		DHCPDDNS1:       strPtr("10.0.0.53"),
 		DHCPDNtpEnabled: true,
 		DHCPDNtp1:       strPtr("10.0.0.123"),
 		DHCPDWins1:      strPtr("10.0.0.44"),
 	}
 
 	t.Run("unmanaged block: current values carried", func(t *testing.T) {
-		network := &unifi.Network{DHCPDEnabled: true, DHCPDDNS1: "", DHCPDNtp1: strPtr("")}
+		network := &unifi.Network{DHCPDEnabled: true, DHCPDDNS1: strPtr(""), DHCPDNtp1: strPtr("")}
 		got := preserveUnmanagedDhcpServer(
 			types.ObjectNull(dhcpServerModel{}.AttributeTypes()),
 			false,
@@ -2679,8 +2681,8 @@ func Test_preserveUnmanagedDhcpServer(t *testing.T) {
 		if !got {
 			t.Fatal("preserveUnmanagedDhcpServer = false, want true")
 		}
-		if network.DHCPDDNS1 != "10.0.0.53" {
-			t.Errorf("DHCPDDNS1 = %q, want carried 10.0.0.53", network.DHCPDDNS1)
+		if network.DHCPDDNS1 == nil || *network.DHCPDDNS1 != "10.0.0.53" {
+			t.Errorf("DHCPDDNS1 = %v, want carried 10.0.0.53", network.DHCPDDNS1)
 		}
 		if network.DHCPDNtp1 == nil || *network.DHCPDNtp1 != "10.0.0.123" {
 			t.Errorf("DHCPDNtp1 = %v, want carried 10.0.0.123", network.DHCPDNtp1)
@@ -2694,7 +2696,7 @@ func Test_preserveUnmanagedDhcpServer(t *testing.T) {
 	})
 
 	t.Run("managed block: untouched", func(t *testing.T) {
-		network := &unifi.Network{DHCPDDNS1: ""}
+		network := &unifi.Network{DHCPDDNS1: strPtr("")}
 		got := preserveUnmanagedDhcpServer(
 			types.ObjectValueMust(dhcpServerModel{}.AttributeTypes(), map[string]attr.Value{
 				"boot":                types.ObjectNull(dhcpBootModel{}.AttributeTypes()),
@@ -2721,8 +2723,8 @@ func Test_preserveUnmanagedDhcpServer(t *testing.T) {
 		if got {
 			t.Fatal("preserveUnmanagedDhcpServer = true, want false for managed block")
 		}
-		if network.DHCPDDNS1 != "" {
-			t.Errorf("DHCPDDNS1 = %q, want untouched empty", network.DHCPDDNS1)
+		if network.DHCPDDNS1 == nil || *network.DHCPDDNS1 != "" {
+			t.Errorf("DHCPDDNS1 = %v, want untouched empty", network.DHCPDDNS1)
 		}
 	})
 

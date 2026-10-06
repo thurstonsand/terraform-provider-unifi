@@ -118,7 +118,6 @@ resource "unifi_network" "third_party" {
 - `ipv6_ra_valid_lifetime` (String) The IPv6 Router Advertisement valid lifetime, as a Go duration string (e.g. `86400s`, `24h`). Must be a whole number of seconds between `0s` and `31536000s` (1 year).
 - `ipv6_static_subnet` (String) The IPv6 static subnet of the network. Only used when `ipv6_interface_type` is `static`.
 - `lte_lan` (Boolean) Whether this network/VLAN stays active when the gateway fails over to a UniFi LTE (cellular) backup WAN. Maps to the controller's `lte_lan_enabled` flag and only matters when a UniFi LTE failover device is in use; otherwise it is cosmetic. Defaults to `true` (network stays available during LTE failover); set to `false` to disable it while on the LTE backup link. The controller may set this automatically, which is why existing networks can show differing values.
-- `multicast_dns` (Boolean) Specifies whether mDNS is enabled. This is read back from the controller rather than defaulted: some controllers (notably UniFi OS gateways) ignore `mdns_enabled` at create/update time and always store `false`, so forcing a `true` default produced a "provider produced inconsistent result after apply" error.
 - `nat_outbound_ip_addresses` (Attributes List) List of NAT outbound IP addresses. (see [below for nested schema](#nestedatt--nat_outbound_ip_addresses))
 - `network_isolation` (Boolean) Specifies whether network isolation is enabled.
 - `purpose` (String) The network purpose: `corporate` (default), `guest`, or `vlan-only`. Leave unset to let the controller manage it (a `third_party_gateway` network is always `vlan-only`). **Note:** on Zone-Based-Firewall controllers the purpose is coupled to the firewall zone — a `guest` network only keeps `purpose = "guest"` while it belongs to the guest/Hotspot zone (assign it there via `unifi_firewall_zone`), otherwise the controller rewrites it back to `corporate` and the apply fails with an inconsistent-result error.
@@ -132,6 +131,7 @@ resource "unifi_network" "third_party" {
 ### Read-Only
 
 - `id` (String) The ID of the network.
+- `multicast_dns` (Boolean) Whether the gateway's mDNS proxy reflects this network. Read-only: `mdns_enabled` on the network document is a projection that the controller rewrites, and writing it is accepted and then discarded. Membership is owned by `unifi_setting.site`'s `mdns.enabled_for_network_ids`; set it there and this attribute reports the result.
 
 <a id="nestedatt--dhcp_guarding"></a>
 ### Nested Schema for `dhcp_guarding`

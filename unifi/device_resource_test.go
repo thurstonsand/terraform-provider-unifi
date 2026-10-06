@@ -112,6 +112,49 @@ func Test_resolvePortOverridesForUpdate_zeroDeclaredEchoesCurrent(t *testing.T) 
 	}
 }
 
+// Test_emptyPortOverrideStateStaysUnmanaged covers the state shape a device with
+// no declared port_override blocks now carries: an empty set rather than null.
+// It must reach the wire exactly like the old null did — echoing the
+// controller's overrides, never wiping them.
+func Test_emptyPortOverrideStateStaysUnmanaged(t *testing.T) {
+	ctx := context.Background()
+	r := &deviceResource{}
+
+	model := deviceResourceModel{
+		PortOverride:     emptyPortOverrideSet(),
+		EthernetOverride: emptyEthernetOverrideList(),
+	}
+	deviceReq, diags := r.modelToAPIDevice(ctx, &model)
+	if diags.HasError() {
+		t.Fatalf("modelToAPIDevice diagnostics: %v", diags)
+	}
+
+	current := []unifi.DevicePortOverrides{
+		{PortIDX: ptrInt64(1), NATiveNetworkID: "vlan-a"},
+		{PortIDX: ptrInt64(2), NATiveNetworkID: "vlan-b"},
+	}
+	currentDevice := &unifi.Device{PortOverrides: current}
+
+	minimalDevice := buildMinimalUpdateDevice(
+		deviceReq, currentDevice, resolvePortOverridesForUpdate(currentDevice, deviceReq))
+	if len(minimalDevice.PortOverrides) != len(current) {
+		t.Errorf("PortOverrides = %+v, want the controller's two overrides echoed",
+			minimalDevice.PortOverrides)
+	}
+	if minimalDevice.EthernetOverrides != nil {
+		t.Errorf("EthernetOverrides = %+v, want nil so the key stays off the wire",
+			minimalDevice.EthernetOverrides)
+	}
+
+	nullDevice := &unifi.Device{PortOverrides: nil}
+	minimalDevice = buildMinimalUpdateDevice(
+		deviceReq, nullDevice, resolvePortOverridesForUpdate(nullDevice, deviceReq))
+	if minimalDevice.PortOverrides != nil {
+		t.Errorf("PortOverrides = %#v, want nil to mirror the device's null",
+			minimalDevice.PortOverrides)
+	}
+}
+
 // Test_resolvePortOverridesForUpdate_noCurrentOverridesMirrorsDevice guards the
 // #436/#427 case: a device with no current overrides at all (an AP/gateway) and
 // zero declared blocks must mirror the existing device's representation exactly
@@ -1649,39 +1692,6 @@ func Test_deviceResource_frameworkToRadioTable(t *testing.T) {
 	}
 }
 
-func Test_deviceResource_frameworkToOutletOverrides(t *testing.T) {
-	type args struct {
-		ctx        context.Context
-		outletList types.List
-	}
-	tests := []struct {
-		name  string
-		r     *deviceResource
-		args  args
-		want  []unifi.DeviceOutletOverrides
-		want1 diag.Diagnostics
-	}{}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, got1 := tt.r.frameworkToOutletOverrides(tt.args.ctx, tt.args.outletList)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf(
-					"deviceResource.frameworkToOutletOverrides() got = %v, want %v",
-					got,
-					tt.want,
-				)
-			}
-			if !reflect.DeepEqual(got1, tt.want1) {
-				t.Errorf(
-					"deviceResource.frameworkToOutletOverrides() got1 = %v, want %v",
-					got1,
-					tt.want1,
-				)
-			}
-		})
-	}
-}
-
 func Test_deviceResource_deviceListToModel(t *testing.T) {
 	type args struct {
 		ctx   context.Context
@@ -2085,12 +2095,17 @@ func (m radioTableModel) IsUnknownAny() bool {
 // name). Both halves are exercised: unknowns stay off the wire, and the
 // controller-required name is echoed from the device.
 func TestAccDeviceFramework_radioTable(t *testing.T) {
+	const radioTableAPMAC = "00:15:6d:00:00:02"
+
 	resource.Test(t, resource.TestCase{
-		PreCheck:                 func() { preCheck(t) },
+		PreCheck: func() {
+			preCheck(t)
+			requireRadios(t, radioTableAPMAC, "ng", "na")
+		},
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: testAccDeviceFrameworkConfig_radioTable("6", "36"),
+				Config: testAccDeviceFrameworkConfig_radioTable(radioTableAPMAC, "6", "36"),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("unifi_device.test_ap", "adopted", "true"),
 					resource.TestCheckResourceAttr("unifi_device.test_ap", "radio_table.#", "2"),
@@ -2121,7 +2136,7 @@ func TestAccDeviceFramework_radioTable(t *testing.T) {
 			},
 			{
 				// In-place channel change on the declared entries.
-				Config: testAccDeviceFrameworkConfig_radioTable("11", "40"),
+				Config: testAccDeviceFrameworkConfig_radioTable(radioTableAPMAC, "11", "40"),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(
 						"unifi_device.test_ap",
@@ -2139,10 +2154,10 @@ func TestAccDeviceFramework_radioTable(t *testing.T) {
 	})
 }
 
-func testAccDeviceFrameworkConfig_radioTable(ngChannel, naChannel string) string {
+func testAccDeviceFrameworkConfig_radioTable(mac, ngChannel, naChannel string) string {
 	return fmt.Sprintf(`
 resource "unifi_device" "test_ap" {
-	mac  = "00:15:6d:00:00:01"
+	mac  = %q
 	name = "Test AP Radio"
 	allow_adoption    = true
 	forget_on_destroy = false
@@ -2162,5 +2177,5 @@ resource "unifi_device" "test_ap" {
 		},
 	]
 }
-`, ngChannel, naChannel)
+`, mac, ngChannel, naChannel)
 }

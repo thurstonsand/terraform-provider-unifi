@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_root="$(dirname "$repo_root")"
+sdk_repo="$workspace_root/go-unifi"
+
+step() {
+  local label="$1"
+  shift
+  printf '\n==> %s\n' "$label"
+  time "$@"
+}
+
+install_system_packages() {
+  local packages=(ca-certificates curl gcc git jq make unzip)
+  local missing=()
+  local package
+
+  for package in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$'; then
+      missing+=("$package")
+    fi
+  done
+
+  if ((${#missing[@]})); then
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+  fi
+}
+
+install_go() {
+  local version arch archive checksum install_root download
+  version="$(awk '$1 == "go" { print $2; exit }' "$repo_root/go.mod")"
+
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) printf 'Unsupported architecture: %s\n' "$(uname -m)" >&2; return 1 ;;
+  esac
+
+  archive="go${version}.linux-${arch}.tar.gz"
+  install_root="$HOME/.local/share/go/$version"
+  download="${TMPDIR:-/tmp}/$archive"
+
+  if [[ ! -x "$install_root/bin/go" ]]; then
+    checksum="$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' |
+      jq -r --arg archive "$archive" '.[] | .files[] | select(.filename == $archive) | .sha256' |
+      head -n 1)"
+    if [[ -z "$checksum" ]]; then
+      printf 'Go %s has no published Linux %s archive\n' "$version" "$arch" >&2
+      return 1
+    fi
+
+    curl -fsSL "https://go.dev/dl/$archive" -o "$download"
+    printf '%s  %s\n' "$checksum" "$download" | sha256sum --check --status
+    mkdir -p "$install_root"
+    tar -xzf "$download" --strip-components=1 -C "$install_root"
+    rm -f "$download"
+  fi
+
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$install_root/bin/go" "$HOME/.local/bin/go"
+  ln -sfn "$install_root/bin/gofmt" "$HOME/.local/bin/gofmt"
+}
+
+prepare_checkout() {
+  local repo="$1" origin_url="$2" upstream_url="$3"
+
+  if [[ "$(git -C "$repo" remote get-url origin)" != "$origin_url" ]]; then
+    printf '%s has an unexpected origin; refusing to alter it\n' "$repo" >&2
+    return 1
+  fi
+
+  if git -C "$repo" remote get-url upstream >/dev/null 2>&1; then
+    if [[ "$(git -C "$repo" remote get-url upstream)" != "$upstream_url" ]]; then
+      printf '%s has an unexpected upstream; refusing to alter it\n' "$repo" >&2
+      return 1
+    fi
+  else
+    git -C "$repo" remote add upstream "$upstream_url"
+  fi
+  git -C "$repo" remote set-url --push upstream DISABLED
+
+  if [[ "$(git -C "$repo" rev-parse --is-shallow-repository)" == true ]]; then
+    git -C "$repo" fetch --unshallow origin --no-tags
+  fi
+  git -C "$repo" -c fetch.pruneTags=false fetch origin --tags
+  git -C "$repo" -c fetch.pruneTags=false fetch upstream --prune --no-tags
+  git -C "$repo" -c fetch.pruneTags=false fetch upstream --tags
+}
+
+ensure_sdk_checkout() {
+  if [[ -e "$sdk_repo" && ! -d "$sdk_repo/.git" ]]; then
+    printf '%s exists but is not the go-unifi checkout\n' "$sdk_repo" >&2
+    return 1
+  fi
+
+  if [[ ! -d "$sdk_repo/.git" ]]; then
+    if [[ -d "$workspace_root/repos/go-unifi/.git" ]]; then
+      ln -s "repos/go-unifi" "$sdk_repo"
+    else
+      git clone https://github.com/thurstonsand/go-unifi "$sdk_repo"
+    fi
+  fi
+}
+
+step "Install system packages" install_system_packages
+step "Install the Go version pinned by go.mod" install_go
+step "Locate the go-unifi checkout" ensure_sdk_checkout
+step "Prepare terraform-provider-unifi remotes and history" prepare_checkout \
+  "$repo_root" \
+  https://github.com/thurstonsand/terraform-provider-unifi \
+  https://github.com/ubiquiti-community/terraform-provider-unifi
+step "Prepare go-unifi remotes and history" prepare_checkout \
+  "$sdk_repo" \
+  https://github.com/thurstonsand/go-unifi \
+  https://github.com/ubiquiti-community/go-unifi
+step "Download go-unifi dependencies" bash -c 'cd "$1" && go mod download' _ "$sdk_repo"
+step "Download terraform-provider-unifi dependencies" bash -c 'cd "$1" && go mod download' _ "$repo_root"
+
+printf '\nOrb setup complete. Go %s; both upstream push URLs are disabled.\n' "$(go env GOVERSION)"

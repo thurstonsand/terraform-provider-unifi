@@ -3,12 +3,19 @@ package unifi
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	fwlist "github.com/hashicorp/terraform-plugin-framework/list"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	fwschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/ubiquiti-community/go-unifi/unifi"
 )
@@ -128,6 +135,61 @@ resource "unifi_wan" "minimal" {
 	type    = "dhcp"
 	enabled = true
 }
+`
+}
+
+// TestAccWANFramework_macOverrideLifecycle walks the clone through set, import
+// and removal. The removal step is the one that used to be impossible: with
+// mac_override Optional+Computed the prior value was replanned out of state and
+// the controller kept the clone forever.
+func TestAccWANFramework_macOverrideLifecycle(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { preCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccWANFrameworkConfig_macOverride(true),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("unifi_wan.mac", "mac_override", "02:00:00:00:00:01"),
+					resource.TestCheckResourceAttr("unifi_wan.mac", "mac_override_enabled", "true"),
+				),
+			},
+			{
+				ResourceName:      "unifi_wan.mac",
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccWANFrameworkConfig_macOverride(false),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("unifi_wan.mac", "mac_override"),
+					resource.TestCheckResourceAttr("unifi_wan.mac", "mac_override_enabled", "false"),
+				),
+			},
+			// The clone is gone on the controller too, so the removal converges
+			// instead of coming back as drift on the next refresh.
+			{
+				Config:   testAccWANFrameworkConfig_macOverride(false),
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
+func testAccWANFrameworkConfig_macOverride(withMAC bool) string {
+	mac := ""
+	if withMAC {
+		mac = `
+	mac_override         = "02:00:00:00:00:01"
+	mac_override_enabled = true
+`
+	}
+	return `
+resource "unifi_wan" "mac" {
+	name    = "test-wan-mac"
+	type    = "dhcp"
+	enabled = true
+` + mac + `}
 `
 }
 
@@ -846,4 +908,232 @@ func Test_wanResource_ListResourceConfigSchema(t *testing.T) {
 
 func Test_wanResource_List(t *testing.T) {
 	t.Skip("requires configured client")
+}
+
+// macOverrideSchema mirrors just the two attributes the mac_override plan
+// modifier reads. The real WAN schema has upwards of forty attributes and every
+// one of them would have to be spelled out in the raw tftypes value.
+func macOverrideSchema() fwschema.Schema {
+	return fwschema.Schema{
+		Attributes: map[string]fwschema.Attribute{
+			"mac_override":         fwschema.StringAttribute{Optional: true},
+			"mac_override_enabled": fwschema.BoolAttribute{Optional: true, Computed: true},
+		},
+	}
+}
+
+func macOverridePlanRequest(
+	t *testing.T,
+	configMAC types.String,
+	stateEnabled types.Bool,
+	hasState bool,
+) planmodifier.BoolRequest {
+	t.Helper()
+	ctx := context.Background()
+	s := macOverrideSchema()
+	objType := s.Type().TerraformType(ctx)
+
+	mac := tftypes.NewValue(tftypes.String, nil)
+	if !configMAC.IsNull() {
+		mac = tftypes.NewValue(tftypes.String, configMAC.ValueString())
+	}
+	config := tftypes.NewValue(objType, map[string]tftypes.Value{
+		"mac_override":         mac,
+		"mac_override_enabled": tftypes.NewValue(tftypes.Bool, nil),
+	})
+
+	state := tftypes.NewValue(objType, nil)
+	if hasState {
+		enabled := tftypes.NewValue(tftypes.Bool, nil)
+		if !stateEnabled.IsNull() {
+			enabled = tftypes.NewValue(tftypes.Bool, stateEnabled.ValueBool())
+		}
+		state = tftypes.NewValue(objType, map[string]tftypes.Value{
+			"mac_override":         mac,
+			"mac_override_enabled": enabled,
+		})
+	}
+
+	return planmodifier.BoolRequest{
+		Path:       path.Root("mac_override_enabled"),
+		Config:     tfsdk.Config{Schema: s, Raw: config},
+		Plan:       tfsdk.Plan{Schema: s, Raw: config},
+		State:      tfsdk.State{Schema: s, Raw: state},
+		PlanValue:  types.BoolUnknown(),
+		StateValue: stateEnabled,
+	}
+}
+
+// Test_macOverrideEnabledPlanModifier covers the case that motivated the
+// modifier: a WAN whose mac_override was deleted from the configuration must not
+// keep planning mac_override_enabled = true off prior state, or the apply asks
+// the controller to clone an empty address.
+func Test_macOverrideEnabledPlanModifier(t *testing.T) {
+	ctx := context.Background()
+	m := macOverrideEnabledPlanModifier{}
+
+	t.Run("mac removed from config plans false", func(t *testing.T) {
+		req := macOverridePlanRequest(t, types.StringNull(), types.BoolValue(true), true)
+		resp := &planmodifier.BoolResponse{PlanValue: req.PlanValue}
+		m.PlanModifyBool(ctx, req, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("PlanModifyBool() errored: %v", resp.Diagnostics)
+		}
+		if resp.PlanValue.IsUnknown() || resp.PlanValue.ValueBool() {
+			t.Errorf("expected a planned false, got %v", resp.PlanValue)
+		}
+	})
+
+	t.Run("mac still configured holds prior state", func(t *testing.T) {
+		req := macOverridePlanRequest(t, types.StringValue("02:00:00:00:00:01"), types.BoolValue(true), true)
+		resp := &planmodifier.BoolResponse{PlanValue: req.PlanValue}
+		m.PlanModifyBool(ctx, req, resp)
+		if !resp.PlanValue.Equal(types.BoolValue(true)) {
+			t.Errorf("expected the prior state to be held, got %v", resp.PlanValue)
+		}
+	})
+
+	t.Run("create with a mac leaves the value unknown", func(t *testing.T) {
+		req := macOverridePlanRequest(t, types.StringValue("02:00:00:00:00:01"), types.BoolNull(), false)
+		resp := &planmodifier.BoolResponse{PlanValue: req.PlanValue}
+		m.PlanModifyBool(ctx, req, resp)
+		if !resp.PlanValue.IsUnknown() {
+			t.Errorf("expected the controller to decide, got %v", resp.PlanValue)
+		}
+	})
+
+	t.Run("enabled without a mac is rejected", func(t *testing.T) {
+		req := macOverridePlanRequest(t, types.StringNull(), types.BoolValue(false), true)
+		req.PlanValue = types.BoolValue(true)
+		resp := &planmodifier.BoolResponse{PlanValue: req.PlanValue}
+		m.PlanModifyBool(ctx, req, resp)
+		if !resp.Diagnostics.HasError() {
+			t.Fatal("mac_override_enabled = true without mac_override must fail planning")
+		}
+	})
+
+	t.Run("configured false is left alone", func(t *testing.T) {
+		req := macOverridePlanRequest(t, types.StringNull(), types.BoolValue(false), true)
+		req.PlanValue = types.BoolValue(false)
+		resp := &planmodifier.BoolResponse{PlanValue: req.PlanValue}
+		m.PlanModifyBool(ctx, req, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("configured false was rejected: %v", resp.Diagnostics)
+		}
+		if !resp.PlanValue.Equal(types.BoolValue(false)) {
+			t.Errorf("configured false changed to %v", resp.PlanValue)
+		}
+	})
+}
+
+// Test_wanResource_macOverrideRemoval locks the removal path end to end at the
+// conversion layer: a null mac_override has to reach the controller as an empty
+// string, which is the only value that clears a clone.
+func Test_wanResource_macOverrideRemoval(t *testing.T) {
+	r := &wanResource{}
+	ctx := context.Background()
+
+	newModel := func(mac types.String, enabled types.Bool) *wanResourceModel {
+		model := &wanResourceModel{
+			Name:               types.StringValue("test"),
+			Type:               types.StringValue("dhcp"),
+			Enabled:            types.BoolValue(true),
+			MACOverride:        mac,
+			MACOverrideEnabled: enabled,
+		}
+		applyWANDefaults(model)
+		return model
+	}
+
+	t.Run("null mac clears the clone", func(t *testing.T) {
+		got, diags := r.modelToNetwork(ctx, newModel(types.StringNull(), types.BoolValue(false)))
+		if diags.HasError() {
+			t.Fatalf("modelToNetwork() returned errors: %v", diags)
+		}
+		if got.MACOverride != "" {
+			t.Error("expected an empty mac_override to be sent")
+		}
+		if got.MACOverrideEnabled {
+			t.Error("expected the clone flag to follow the address")
+		}
+	})
+
+	t.Run("stale enabled flag cannot outlive the mac", func(t *testing.T) {
+		got, diags := r.modelToNetwork(ctx, newModel(types.StringNull(), types.BoolValue(true)))
+		if diags.HasError() {
+			t.Fatalf("modelToNetwork() returned errors: %v", diags)
+		}
+		if got.MACOverrideEnabled {
+			t.Error("enabling a clone with no address is not a state the controller can honor")
+		}
+	})
+
+	t.Run("controller empty value reads back as null", func(t *testing.T) {
+		model := &wanResourceModel{}
+		applyWANDefaults(model)
+		name := "test-wan"
+		wanType := "dhcp"
+		diags := r.networkToModel(ctx, &unifi.Network{
+			ID:      "abc123",
+			Name:    &name,
+			Purpose: "wan",
+			WANType: &wanType,
+		}, model, "default")
+		if diags.HasError() {
+			t.Fatalf("networkToModel() returned errors: %v", diags)
+		}
+		if !model.MACOverride.IsNull() {
+			t.Errorf("expected a null mac_override, got %v", model.MACOverride)
+		}
+		if model.MACOverrideEnabled.ValueBool() {
+			t.Error("expected mac_override_enabled to read back false")
+		}
+	})
+}
+
+// Test_wanResource_Schema_macOverride guards both halves of the mac_override
+// contract: it must not be Computed (Optional+Computed retains a removed value
+// forever, so the clone could never be cleared through HCL), and its validators
+// must not echo the address.
+func Test_wanResource_Schema_macOverride(t *testing.T) {
+	const sentinel = "de:ad:be:ef:xx:99"
+	ctx := context.Background()
+	r := &wanResource{}
+	resp := &fwresource.SchemaResponse{}
+	r.Schema(ctx, fwresource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Schema() returned errors: %v", resp.Diagnostics)
+	}
+
+	attr, ok := resp.Schema.Attributes["mac_override"].(fwschema.StringAttribute)
+	if !ok {
+		t.Fatalf("mac_override is not a StringAttribute: %T", resp.Schema.Attributes["mac_override"])
+	}
+	if attr.IsComputed() {
+		t.Error("mac_override must not be Computed; a removed value would be retained from state")
+	}
+	if !attr.IsOptional() || !attr.IsSensitive() {
+		t.Error("mac_override must stay Optional and Sensitive")
+	}
+	if len(attr.Validators) == 0 {
+		t.Fatal("mac_override lost its validators")
+	}
+
+	rejected := false
+	for _, v := range attr.Validators {
+		vResp := &validator.StringResponse{}
+		v.ValidateString(ctx, validator.StringRequest{
+			Path:        path.Root("mac_override"),
+			ConfigValue: types.StringValue(sentinel),
+		}, vResp)
+		for _, d := range vResp.Diagnostics {
+			if strings.Contains(d.Summary(), sentinel) || strings.Contains(d.Detail(), sentinel) {
+				t.Errorf("validator leaks the sensitive value: %s / %s", d.Summary(), d.Detail())
+			}
+		}
+		rejected = rejected || vResp.Diagnostics.HasError()
+	}
+	if !rejected {
+		t.Errorf("no validator rejected %q", sentinel)
+	}
 }

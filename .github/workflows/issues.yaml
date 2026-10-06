@@ -143,9 +143,10 @@ jobs:
   # ── Full issue triage sweep ──────────────────────────────────────────────
   triage:
     if: >-
-      github.event_name == 'push' ||
+      github.repository == 'ubiquiti-community/terraform-provider-unifi' &&
+      (github.event_name == 'push' ||
       (github.event_name == 'schedule' && github.event.schedule == '0 9 * * 1') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'triage' || github.event.inputs.task == 'all'))
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'triage' || github.event.inputs.task == 'all')))
     runs-on: ubuntu-latest
     concurrency:
       group: issue-triage

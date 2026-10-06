@@ -419,13 +419,12 @@ func (r *networkResource) Schema(
 				Default:             booldefault.StaticBool(false),
 			},
 			"multicast_dns": schema.BoolAttribute{
-				MarkdownDescription: "Specifies whether mDNS is enabled. This is " +
-					"read back from the controller rather than defaulted: some " +
-					"controllers (notably UniFi OS gateways) ignore `mdns_enabled` " +
-					"at create/update time and always store `false`, so forcing a " +
-					"`true` default produced a \"provider produced inconsistent " +
-					"result after apply\" error.",
-				Optional: true,
+				MarkdownDescription: "Whether the gateway's mDNS proxy reflects this " +
+					"network. Read-only: `mdns_enabled` on the network document is a " +
+					"projection that the controller rewrites, and writing it is " +
+					"accepted and then discarded. Membership is owned by " +
+					"`unifi_setting.site`'s `mdns.enabled_for_network_ids`; set it " +
+					"there and this attribute reports the result.",
 				Computed: true,
 				PlanModifiers: []planmodifier.Bool{
 					boolplanmodifier.UseStateForUnknown(),
@@ -1606,14 +1605,16 @@ func (r *networkResource) modelToNetwork(
 	var diags diag.Diagnostics
 
 	network := &unifi.Network{
-		Name:                        model.Name.ValueStringPointer(),
-		Purpose:                     unifi.PurposeCorporate,
-		NetworkGroup:                util.Ptr("LAN"),
-		AutoScaleEnabled:            model.AutoScale.ValueBool(),
-		IPSubnet:                    model.Subnet.ValueStringPointer(),
-		NetworkIsolationEnabled:     model.NetworkIsolation.ValueBool(),
-		SettingPreference:           model.SettingPreference.ValueStringPointer(),
-		InternetAccessEnabled:       model.InternetAccess.ValueBool(),
+		Name:                    model.Name.ValueStringPointer(),
+		Purpose:                 unifi.PurposeCorporate,
+		NetworkGroup:            util.Ptr("LAN"),
+		AutoScaleEnabled:        model.AutoScale.ValueBool(),
+		IPSubnet:                model.Subnet.ValueStringPointer(),
+		NetworkIsolationEnabled: model.NetworkIsolation.ValueBool(),
+		SettingPreference:       model.SettingPreference.ValueStringPointer(),
+		InternetAccessEnabled:   model.InternetAccess.ValueBool(),
+		// go-unifi always serializes mdns_enabled. Echo the refreshed value
+		// rather than clearing it; membership is written by unifi_setting.site.
 		MdnsEnabled:                 model.MulticastDNS.ValueBool(),
 		GatewayType:                 model.GatewayType.ValueStringPointer(),
 		IPV6InterfaceType:           model.IPv6InterfaceType.ValueStringPointer(),
@@ -1874,35 +1875,35 @@ func (r *networkResource) modelToNetwork(
 						}
 						switch i {
 						case 0:
-							network.DHCPDDNS1 = dns
+							network.DHCPDDNS1 = util.Ptr(dns)
 						case 1:
-							network.DHCPDDNS2 = dns
+							network.DHCPDDNS2 = util.Ptr(dns)
 						case 2:
-							network.DHCPDDNS3 = dns
+							network.DHCPDDNS3 = util.Ptr(dns)
 						case 3:
-							network.DHCPDDNS4 = dns
+							network.DHCPDDNS4 = util.Ptr(dns)
 						}
 					}
 					// Set remaining DNS servers to empty string
 					for i := len(dnsServers); i < 4; i++ {
 						switch i {
 						case 0:
-							network.DHCPDDNS1 = ""
+							network.DHCPDDNS1 = util.Ptr("")
 						case 1:
-							network.DHCPDDNS2 = ""
+							network.DHCPDDNS2 = util.Ptr("")
 						case 2:
-							network.DHCPDDNS3 = ""
+							network.DHCPDDNS3 = util.Ptr("")
 						case 3:
-							network.DHCPDDNS4 = ""
+							network.DHCPDDNS4 = util.Ptr("")
 						}
 					}
 				}
 			} else {
 				// Set all DNS servers to empty string when not configured
-				network.DHCPDDNS1 = ""
-				network.DHCPDDNS2 = ""
-				network.DHCPDDNS3 = ""
-				network.DHCPDDNS4 = ""
+				network.DHCPDDNS1 = util.Ptr("")
+				network.DHCPDDNS2 = util.Ptr("")
+				network.DHCPDDNS3 = util.Ptr("")
+				network.DHCPDDNS4 = util.Ptr("")
 			}
 		}
 	} else if !relayEnabled {
@@ -1925,10 +1926,10 @@ func (r *networkResource) modelToNetwork(
 		network.DHCPDWPAdUrl = util.Ptr("")
 		network.DHCPDTFTPServer = util.Ptr("")
 		network.DHCPDUnifiController = util.Ptr("")
-		network.DHCPDDNS1 = ""
-		network.DHCPDDNS2 = ""
-		network.DHCPDDNS3 = ""
-		network.DHCPDDNS4 = ""
+		network.DHCPDDNS1 = util.Ptr("")
+		network.DHCPDDNS2 = util.Ptr("")
+		network.DHCPDDNS3 = util.Ptr("")
+		network.DHCPDDNS4 = util.Ptr("")
 	}
 
 	// Handle DHCPv6 server configuration
@@ -2037,6 +2038,7 @@ func (r *networkResource) networkToModel(
 	model.Enabled = types.BoolValue(network.Enabled)
 	model.IgmpSnooping = types.BoolValue(network.IGMPSnooping)
 	model.NetworkIsolation = types.BoolValue(network.NetworkIsolationEnabled)
+	model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
 
 	// Set third_party_gateway based on API purpose
 	isVLANOnly := network.Purpose == unifi.PurposeVLANOnly
@@ -2062,14 +2064,6 @@ func (r *networkResource) networkToModel(
 		model.AutoScale = previousModel.AutoScale
 		model.SettingPreference = previousModel.SettingPreference
 		model.InternetAccess = previousModel.InternetAccess
-		// multicast_dns uses UseStateForUnknown, so it may be unknown during
-		// Create. Resolve it from the API value (the controller does not honor
-		// mDNS for vlan-only networks, so this is effectively false).
-		if previousModel.MulticastDNS.IsUnknown() {
-			model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
-		} else {
-			model.MulticastDNS = previousModel.MulticastDNS
-		}
 		// Preserve configured values, but normalize import/read values that are
 		// absent because the controller omits fields irrelevant to vlan-only
 		// networks. Leaving these null/unknown would perpetually plan the schema
@@ -2161,18 +2155,6 @@ func (r *networkResource) networkToModel(
 		}
 		model.SettingPreference = types.StringPointerValue(network.SettingPreference)
 		model.InternetAccess = types.BoolValue(network.InternetAccessEnabled)
-		// Some controllers (notably UniFi OS gateways) ignore mdns_enabled
-		// per-network and always store false, so a configured `true` would fail
-		// the consistency check (#282; the vlan-only branch above already does
-		// this). Preserve the configured/known value; fall back to the
-		// controller's value only when it wasn't set by the user (unknown/null,
-		// e.g. on Read or List).
-		if previousModel != nil && !previousModel.MulticastDNS.IsNull() &&
-			!previousModel.MulticastDNS.IsUnknown() {
-			model.MulticastDNS = previousModel.MulticastDNS
-		} else {
-			model.MulticastDNS = types.BoolValue(network.MdnsEnabled)
-		}
 		// UniFi omits these fields when they have their implicit controller defaults.
 		// Normalize the omitted values to the provider schema defaults so an imported
 		// network does not perpetually plan null -> default/none changes (#414).
@@ -2365,19 +2347,9 @@ func (r *networkResource) networkToModel(
 		diags.Append(d...)
 
 		// Build DNS servers list from DHCPDDNS1-4
-		var dnsServers []string
-		if network.DHCPDDNS1 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS1)
-		}
-		if network.DHCPDDNS2 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS2)
-		}
-		if network.DHCPDDNS3 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS3)
-		}
-		if network.DHCPDDNS4 != "" {
-			dnsServers = append(dnsServers, network.DHCPDDNS4)
-		}
+		dnsServers := collectNonEmptyStringPointers(
+			network.DHCPDDNS1, network.DHCPDDNS2, network.DHCPDDNS3, network.DHCPDDNS4,
+		)
 
 		dnsServersList, d := stringListOrNull(ctx, dnsServers, previousDhcpServer.DnsServers)
 		diags.Append(d...)

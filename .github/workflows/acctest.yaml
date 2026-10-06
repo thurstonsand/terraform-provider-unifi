@@ -1,5 +1,6 @@
 name: Acceptance Tests
 on:
+  workflow_dispatch:
   release:
     types: [published]
   schedule:
@@ -43,14 +44,14 @@ jobs:
           retry_on: "timeout"
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.repository == 'ubiquiti-community/terraform-provider-unifi' }}
         uses: codecov/test-results-action@v1
         with:
           use_oidc: true
           flags: acceptance
 
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.repository == 'ubiquiti-community/terraform-provider-unifi' }}
         uses: codecov/codecov-action@v7
         with:
           use_oidc: true

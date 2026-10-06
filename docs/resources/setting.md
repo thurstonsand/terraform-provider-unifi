@@ -83,6 +83,7 @@ resource "unifi_setting" "radius_only" {
 - `igmp_snooping` (Attributes) Site-level IGMP snooping setting. On UniFi Network 10.3.x+ the effective IGMP snooping toggle lives here rather than on each network. Advanced querier/flood options configured in the UI are preserved across updates. (see [below for nested schema](#nestedatt--igmp_snooping))
 - `ips` (Attributes) Intrusion Prevention System (IPS/IDS) and threat management settings. Basic IDS/IPS uses the built-in Emerging Threats ruleset and is free. A UniFi CyberSecure subscription adds enhanced threat intelligence from Proofpoint and Cloudflare on top of the base ruleset. (see [below for nested schema](#nestedatt--ips))
 - `lcm` (Attributes) LCD/display (LCM) settings for devices with a screen. (see [below for nested schema](#nestedatt--lcm))
+- `mdns` (Attributes) Site-level multicast DNS (Bonjour) repeater setting. This block controls the global mode, the networks the repeater bridges, and the forwarded services; `unifi_network.multicast_dns` reports the resulting per-network membership read-only. Fields not declared here are preserved across updates. (see [below for nested schema](#nestedatt--mdns))
 - `mgmt` (Attributes) Management settings. (see [below for nested schema](#nestedatt--mgmt))
 - `network_optimization` (Attributes) Automated network optimization settings. (see [below for nested schema](#nestedatt--network_optimization))
 - `ntp` (Attributes) NTP (time server) settings. (see [below for nested schema](#nestedatt--ntp))
@@ -225,6 +226,27 @@ Optional:
 - `idle_timeout` (Number) Seconds of inactivity before the display turns off (10-3600).
 - `sync` (Boolean) Sync display settings across devices.
 - `touch_event` (Boolean) Whether touch events on the display are enabled.
+
+
+<a id="nestedatt--mdns"></a>
+### Nested Schema for `mdns`
+
+Optional:
+
+- `custom_services` (Attributes List) Custom service records to forward. An empty list clears every custom service. (see [below for nested schema](#nestedatt--mdns--custom_services))
+- `enabled_for` (String) Scope of the repeater: `all` for every network, or `some` to limit it to `enabled_for_network_ids`.
+- `enabled_for_network_ids` (List of String) IDs of the networks the repeater bridges when `enabled_for` is `some`.
+- `mode` (String) mDNS mode: `all`, `auto`, or `custom`. `custom` is what the UI writes when specific services are selected.
+- `predefined_services` (List of String) Codes of the built-in services to forward, e.g. `apple_airPlay`, `homeKit`, `google_chromecast`. An empty list clears every predefined service.
+
+<a id="nestedatt--mdns--custom_services"></a>
+### Nested Schema for `mdns.custom_services`
+
+Optional:
+
+- `address` (String) Service address, e.g. `_myservice._tcp.local`.
+- `name` (String) Display name of the custom service.
+
 
 
 <a id="nestedatt--mgmt"></a>

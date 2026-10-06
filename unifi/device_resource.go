@@ -31,8 +31,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/ubiquiti-community/go-unifi/unifi"
 	"github.com/ubiquiti-community/terraform-provider-unifi/unifi/util"
@@ -82,14 +84,15 @@ type deviceResource struct {
 
 // deviceResourceModel describes the resource data model.
 type deviceResourceModel struct {
-	ID              types.String       `tfsdk:"id"`
-	Site            types.String       `tfsdk:"site"`
-	MAC             hwtypes.MACAddress `tfsdk:"mac"`
-	Name            types.String       `tfsdk:"name"`
-	Disabled        types.Bool         `tfsdk:"disabled"`
-	PortOverride    types.Set          `tfsdk:"port_override"`
-	AllowAdoption   types.Bool         `tfsdk:"allow_adoption"`
-	ForgetOnDestroy types.Bool         `tfsdk:"forget_on_destroy"`
+	ID               types.String       `tfsdk:"id"`
+	Site             types.String       `tfsdk:"site"`
+	MAC              hwtypes.MACAddress `tfsdk:"mac"`
+	Name             types.String       `tfsdk:"name"`
+	Disabled         types.Bool         `tfsdk:"disabled"`
+	PortOverride     types.Set          `tfsdk:"port_override"`
+	EthernetOverride types.List         `tfsdk:"ethernet_override"`
+	AllowAdoption    types.Bool         `tfsdk:"allow_adoption"`
+	ForgetOnDestroy  types.Bool         `tfsdk:"forget_on_destroy"`
 
 	// Network configuration
 	ConfigNetwork types.Object `tfsdk:"config_network"`
@@ -612,9 +615,10 @@ func (r *deviceResource) Schema(
 
 			// Outlet settings
 			"outlet_enabled": schema.BoolAttribute{
-				Description: "Enable outlet control.",
-				Optional:    true,
-				Computed:    true,
+				Description: "Whether the device's outlet control is enabled, as reported " +
+					"by the controller. Read-only: the provider observes outlet state and " +
+					"never writes it, so a PDU's relays cannot be switched from Terraform.",
+				Computed: true,
 			},
 
 			// Management
@@ -756,34 +760,26 @@ func (r *deviceResource) Schema(
 
 			// Outlet overrides
 			"outlet_overrides": schema.ListNestedAttribute{
-				Description: "Outlet configuration overrides.",
-				Optional:    true,
-				Computed:    true,
-				// Keep the prior value when the plan leaves it unknown, so editing an
-				// unrelated device field doesn't replan every outlet to
-				// "(known after apply)".
-				PlanModifiers: []planmodifier.List{
-					listplanmodifier.UseStateForUnknown(),
-				},
+				Description: "The device's per-outlet configuration, as reported by the " +
+					"controller. Read-only: outlets carry live equipment, so the provider " +
+					"observes them and never writes a relay state or power-cycle change.",
+				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"index": schema.Int64Attribute{
 							Description: "Outlet index.",
-							Required:    true,
+							Computed:    true,
 						},
 						"name": schema.StringAttribute{
 							Description: "Outlet name.",
-							Optional:    true,
 							Computed:    true,
 						},
 						"relay_state": schema.BoolAttribute{
 							Description: "Relay state (on/off).",
-							Optional:    true,
 							Computed:    true,
 						},
 						"cycle_enabled": schema.BoolAttribute{
-							Description: "Enable power cycle.",
-							Optional:    true,
+							Description: "Whether the outlet's power cycle is enabled.",
 							Computed:    true,
 						},
 					},
@@ -1020,6 +1016,38 @@ func (r *deviceResource) Schema(
 						"voice_networkconf_id": schema.StringAttribute{
 							Description: "Voice network ID.",
 							Optional:    true,
+						},
+					},
+				},
+			},
+			"ethernet_override": schema.ListNestedBlock{
+				Description: "Assigns a physical interface of a gateway (UDM/UXG) to a network " +
+					"group, which is how a port is made a WAN, a WAN2, or a LAN port. Only the " +
+					"interfaces you declare are managed: the provider overlays them onto the " +
+					"device's current `ethernet_overrides` list, so undeclared interfaces keep " +
+					"their existing assignment and their other settings. Declaring no block at " +
+					"all leaves the whole list unmanaged, and removing every block relinquishes " +
+					"ownership without resetting anything on the controller.",
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"ifname": schema.StringAttribute{
+							Description: "Physical interface name, e.g. `eth8`. The interface must " +
+								"already exist on the device.",
+							Required: true,
+							Validators: []validator.String{
+								stringvalidator.RegexMatches(
+									ethernetIfnamePattern,
+									"must be an interface name of the form eth0-eth99",
+								),
+							},
+						},
+						"network_group": schema.StringAttribute{
+							Description: "Network group the interface belongs to: `WAN`, `WAN2`-`WAN9`, " +
+								"`LAN`, `LAN2`-`LAN8`, or `MGMT`.",
+							Required: true,
+							Validators: []validator.String{
+								stringvalidator.OneOf(ethernetNetworkGroups...),
+							},
 						},
 					},
 				},
@@ -1325,6 +1353,7 @@ func (r *deviceResource) Read(
 	allowAdoption := state.AllowAdoption
 	forgetOnDestroy := state.ForgetOnDestroy
 	priorPortOverride := state.PortOverride
+	priorEthernetOverride := state.EthernetOverride
 
 	// The identity (device MAC) may be the only key available — e.g. the state
 	// written by an identity-based import carries just the MAC. Fall back to it
@@ -1393,24 +1422,19 @@ func (r *deviceResource) Read(
 		state.ForgetOnDestroy = forgetOnDestroy
 	}
 
-	// Reconcile port_override: the API returns all ports with all fields, but
-	// the user only configures a subset. Rebuild state from the API response
-	// using only the ports/fields the user configured, so drift is detectable.
-	// If the user configured no port_overrides, keep state null so Terraform
-	// doesn't plan to remove ports it doesn't manage.
-	if priorPortOverride.IsNull() || priorPortOverride.IsUnknown() {
-		state.PortOverride = priorPortOverride
-	} else {
-		reconciled, reconcileDiags := r.reconcilePortOverrides(
-			ctx,
-			priorPortOverride,
-			device.PortOverrides,
-		)
-		resp.Diagnostics.Append(reconcileDiags...)
-		if !resp.Diagnostics.HasError() {
-			state.PortOverride = reconciled
-		}
+	portOverride, portDiags := r.refreshPortOverrideState(
+		ctx, priorPortOverride, device.PortOverrides)
+	resp.Diagnostics.Append(portDiags...)
+
+	ethernetOverride, ethDiags := refreshEthernetOverrideState(
+		ctx, priorEthernetOverride, device.EthernetOverrides)
+	resp.Diagnostics.Append(ethDiags...)
+
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	state.PortOverride = portOverride
+	state.EthernetOverride = ethernetOverride
 
 	resp.Diagnostics.Append(resp.Identity.SetAttribute(ctx, path.Root("mac"), state.MAC)...)
 	diags = resp.State.Set(ctx, state)
@@ -1441,6 +1465,25 @@ func (r *deviceResource) Update(
 	diags = req.State.Get(ctx, &state)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// allow_adoption and forget_on_destroy live only in Terraform; the controller
+	// has no such fields. When they are the only thing the plan changes, record
+	// the new values and stop: fetching the device would be pointless and the PUT
+	// that follows would push controller-owned fields for no reason.
+	flagOnly, flagDiags := planChangesOnlyAdoptionFlags(req.Plan, req.State, req.Config)
+	resp.Diagnostics.Append(flagDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if flagOnly {
+		resp.State = tfsdk.State{Schema: req.State.Schema, Raw: req.State.Raw.Copy()}
+		resp.Diagnostics.Append(resp.State.SetAttribute(
+			ctx, path.Root("allow_adoption"), plan.AllowAdoption)...)
+		resp.Diagnostics.Append(resp.State.SetAttribute(
+			ctx, path.Root("forget_on_destroy"), plan.ForgetOnDestroy)...)
+		resp.Diagnostics.Append(resp.Identity.SetAttribute(ctx, path.Root("mac"), state.MAC)...)
 		return
 	}
 
@@ -1744,12 +1787,80 @@ func (r *deviceResource) ImportState(
 
 // Helper methods
 
+// planChangesOnlyAdoptionFlags reports whether only the Terraform-local flags
+// changed. An unknown planned value is safe to ignore only when configuration
+// left that attribute null. A configured unknown may resolve to a controller
+// change during apply, so it must take the normal update path.
+func planChangesOnlyAdoptionFlags(
+	plan tfsdk.Plan,
+	state tfsdk.State,
+	config tfsdk.Config,
+) (bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if plan.Raw.IsNull() || state.Raw.IsNull() || config.Raw.IsNull() {
+		return false, diags
+	}
+
+	decode := func(value tftypes.Value, description string) map[string]tftypes.Value {
+		attrs := map[string]tftypes.Value{}
+		if err := value.As(&attrs); err != nil {
+			diags.AddError(
+				"Error Comparing Device Configuration",
+				fmt.Sprintf("Could not decode the %s device value: %s", description, err),
+			)
+		}
+		return attrs
+	}
+
+	planAttrs := decode(plan.Raw, "planned")
+	stateAttrs := decode(state.Raw, "prior state")
+	configAttrs := decode(config.Raw, "configured")
+	if diags.HasError() {
+		return false, diags
+	}
+
+	flagChanged := false
+	for name, planValue := range planAttrs {
+		stateValue, stateOK := stateAttrs[name]
+		configValue, configOK := configAttrs[name]
+		if !stateOK || !configOK {
+			return false, diags
+		}
+
+		if name == "allow_adoption" || name == "forget_on_destroy" {
+			if !planValue.IsKnown() {
+				return false, diags
+			}
+			if !planValue.Equal(stateValue) {
+				flagChanged = true
+			}
+			continue
+		}
+
+		if planValue.Equal(stateValue) {
+			continue
+		}
+		if !planValue.IsKnown() && configValue.IsKnown() && configValue.IsNull() {
+			continue
+		}
+		return false, diags
+	}
+
+	return flagChanged, diags
+}
+
 // buildMinimalUpdateDevice assembles the Device sent in an update PUT. The full
 // Device struct carries computed fields (adopted, state, …) whose Go zero-values
 // the API rejects, so only the user-configured / API-required fields are sent.
 // LED overrides MUST be included: omitting them makes the controller keep the
 // old values, so the post-apply read conflicts with the plan (#337). All of the
 // LED fields are `omitempty`, so unset ones are dropped from the body.
+//
+// outlet_enabled and outlet_overrides are absent by construction: this function
+// names every field it sends, and the outlet fields are observation-only. A PDU
+// update triggered by an unrelated attribute therefore never carries a relay
+// state or a power-cycle flag on the wire.
 //
 // mgmt_network_id (the UI "Network Override") is likewise user-configurable and
 // must be carried here: the earlier hand-listed body dropped it, so the
@@ -1775,6 +1886,12 @@ func (r *deviceResource) ImportState(
 // plan (user-configured, or state-inherited via the list's UseStateForUnknown),
 // its non-zero sub-fields (channel, tx_power, …) also travel in the PUT; sending
 // back the values the controller already returned is idempotent.
+//
+// ethernet_overrides is carried only when the resource actually manages it.
+// resolveEthernetOverridesForUpdate leaves deviceReq.EthernetOverrides nil when
+// no ethernet_override block is configured, and the field is `omitempty`, so a
+// device resource that never declares one keeps the key off the wire and its
+// PUT body byte-identical to before.
 func buildMinimalUpdateDevice(
 	deviceReq, currentDevice *unifi.Device,
 	portOverrides []unifi.DevicePortOverrides,
@@ -1808,6 +1925,7 @@ func buildMinimalUpdateDevice(
 		SwitchVLANEnabled:          deviceReq.SwitchVLANEnabled,
 		MeshStaVapEnabled:          deviceReq.MeshStaVapEnabled,
 		RadioTable:                 deviceReq.RadioTable,
+		EthernetOverrides:          deviceReq.EthernetOverrides,
 	}
 	if currentDevice != nil {
 		minimalDevice.State = currentDevice.State
@@ -1907,6 +2025,17 @@ func (r *deviceResource) updateDevice(
 	}
 
 	portOverrides := resolvePortOverridesForUpdate(currentDevice, deviceReq)
+
+	// Overlay the declared interface assignments onto the controller's current
+	// list. Nil means no ethernet_override block is configured, and stays nil so
+	// the field never reaches the PUT body.
+	ethernetOverrides, ethDiags := resolveEthernetOverridesForUpdate(
+		currentDevice.EthernetOverrides, deviceReq.EthernetOverrides)
+	diags.Append(ethDiags...)
+	if diags.HasError() {
+		return diags
+	}
+	deviceReq.EthernetOverrides = ethernetOverrides
 
 	minimalDevice := buildMinimalUpdateDevice(deviceReq, currentDevice, portOverrides)
 
@@ -2215,8 +2344,9 @@ func (r *deviceResource) modelToAPIDevice(
 		device.LcmNightModeEnds = model.LcmNightModeEnds.ValueString()
 	}
 
-	// Outlet settings
-	device.OutletEnabled = model.OutletEnabled.ValueBool()
+	// Outlet settings are observation-only: outlet_enabled and outlet_overrides
+	// are Computed, never configurable, and never converted back into a device
+	// request. Writing them would switch relays on a PDU carrying live gear.
 
 	// Management
 	if !model.MgmtNetworkID.IsNull() {
@@ -2241,21 +2371,19 @@ func (r *deviceResource) modelToAPIDevice(
 		}
 	}
 
+	// Convert ethernet overrides
+	ethernetOverrides, ethDiags := r.frameworkToEthernetOverrides(ctx, model.EthernetOverride)
+	diags.Append(ethDiags...)
+	if !diags.HasError() {
+		device.EthernetOverrides = ethernetOverrides
+	}
+
 	// Convert radio table
 	if !model.RadioTable.IsNull() && !model.RadioTable.IsUnknown() {
 		radioTable, convDiags := r.frameworkToRadioTable(ctx, model.RadioTable)
 		diags.Append(convDiags...)
 		if !diags.HasError() {
 			device.RadioTable = radioTable
-		}
-	}
-
-	// Convert outlet overrides
-	if !model.OutletOverrides.IsNull() && !model.OutletOverrides.IsUnknown() {
-		outletOverrides, convDiags := r.frameworkToOutletOverrides(ctx, model.OutletOverrides)
-		diags.Append(convDiags...)
-		if !diags.HasError() {
-			device.OutletOverrides = outletOverrides
 		}
 	}
 
@@ -2356,6 +2484,34 @@ func mergePortOverridesByIndex(
 		}
 	}
 	return merged
+}
+
+// refreshPortOverrideState rebuilds port_override from the API response for the
+// ports and fields the practitioner declared, so drift in a managed port is
+// visible while the computed fields the controller adds to every port are not.
+//
+// A resource that declares no port_override blocks manages no ports, and state
+// must record that as an EMPTY set rather than null. Terraform renders a
+// block-less configuration as an empty collection, so a null in state reads as a
+// difference: every plan proposes an in-place update, and once any attribute
+// really does change, the framework re-plans every computed attribute as
+// "known after apply". That is the whole of the spurious USPPDUP update plan.
+func (r *deviceResource) refreshPortOverrideState(
+	ctx context.Context,
+	prior types.Set,
+	apiOverrides []unifi.DevicePortOverrides,
+) (types.Set, diag.Diagnostics) {
+	if prior.IsNull() || prior.IsUnknown() || len(prior.Elements()) == 0 {
+		return emptyPortOverrideSet(), nil
+	}
+	return r.reconcilePortOverrides(ctx, prior, apiOverrides)
+}
+
+// emptyPortOverrideSet carries the nested-block invariant: Terraform renders a
+// block-less configuration as an empty collection, never null, so state has to
+// match or every plan proposes a change.
+func emptyPortOverrideSet() types.Set {
+	return types.SetValueMust(types.ObjectType{AttrTypes: portOverrideAttrTypes()}, nil)
 }
 
 // reconcilePortOverrides rebuilds the port_override Set from the API response,
@@ -3586,45 +3742,6 @@ func (r *deviceResource) frameworkToRadioTable(
 	return radios, diags
 }
 
-// frameworkToOutletOverrides converts Framework types to API OutletOverrides.
-func (r *deviceResource) frameworkToOutletOverrides(
-	ctx context.Context,
-	outletList types.List,
-) ([]unifi.DeviceOutletOverrides, diag.Diagnostics) {
-	var diags diag.Diagnostics
-
-	if outletList.IsNull() || outletList.IsUnknown() {
-		return nil, diags
-	}
-
-	elements := outletList.Elements()
-	outlets := make([]unifi.DeviceOutletOverrides, 0, len(elements))
-
-	for _, elem := range elements {
-		obj, ok := elem.(types.Object)
-		if !ok {
-			continue
-		}
-
-		var model outletOverrideModel
-		diags.Append(obj.As(ctx, &model, basetypes.ObjectAsOptions{})...)
-		if diags.HasError() {
-			continue
-		}
-
-		outlet := unifi.DeviceOutletOverrides{
-			Index:        model.Index.ValueInt64Pointer(),
-			Name:         model.Name.ValueString(),
-			RelayState:   model.RelayState.ValueBool(),
-			CycleEnabled: model.CycleEnabled.ValueBool(),
-		}
-
-		outlets = append(outlets, outlet)
-	}
-
-	return outlets, diags
-}
-
 // ---------------------------------------------------------------------------
 // List resource
 // ---------------------------------------------------------------------------
@@ -3650,6 +3767,10 @@ func (r *deviceResource) deviceListToModel(
 	model.PortOverride = types.SetNull(
 		types.ObjectType{AttrTypes: portOverrideAttrTypes()},
 	)
+
+	// ethernet_override is partially owned: only the declared interfaces belong
+	// in state, and a listing declares none.
+	model.EthernetOverride = types.ListNull(ethernetOverrideObjectType())
 
 	// Write-only plan flags are never returned by the API.
 	model.AllowAdoption = types.BoolNull()
