@@ -450,12 +450,13 @@ func TestAccDeviceFramework_basic(t *testing.T) {
 				),
 			},
 			// Classic string import. ImportStateVerify replays the import with the
-			// `id` attribute value, exercising the ID-or-MAC fallback.
+			// `id` attribute value, exercising the ID-or-MAC fallback. `state` can
+			// flip to provisioning between the apply's read and the import's.
 			{
 				ResourceName:            "unifi_device.test",
 				ImportState:             true,
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"allow_adoption", "forget_on_destroy"},
+				ImportStateVerifyIgnore: []string{"allow_adoption", "forget_on_destroy", "state"},
 			},
 			// Classic string import by MAC address (the documented import ID).
 			{
@@ -463,7 +464,7 @@ func TestAccDeviceFramework_basic(t *testing.T) {
 				ImportState:             true,
 				ImportStateId:           "00:27:22:00:00:02",
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"allow_adoption", "forget_on_destroy"},
+				ImportStateVerifyIgnore: []string{"allow_adoption", "forget_on_destroy", "state"},
 			},
 			// The post-import refresh defaults the provider-only flags
 			// allow_adoption/forget_on_destroy to true, so the identity-import
