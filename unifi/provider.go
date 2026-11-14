@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
+	"github.com/ubiquiti-community/go-unifi/protect"
 	ui "github.com/ubiquiti-community/go-unifi/unifi"
 )
 
@@ -42,6 +43,9 @@ type unifiProviderModel struct {
 type Client struct {
 	*ui.ApiClient
 	Site string
+
+	// Protect reaches the Protect Integration API over ApiClient's session.
+	Protect *protect.ClientWithResponses
 
 	// groupCache memoizes network members group name<->ID lookups per site. It lives
 	// on the shared *Client (one per provider configuration) rather than on the
@@ -274,10 +278,17 @@ func (p *unifiProvider) Configure(
 		return
 	}
 
+	protectClient, err := protect.New(client)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Create UniFi Protect Client", err.Error())
+		return
+	}
+
 	// Create wrapper client with site info
 	configuredClient := &Client{
 		ApiClient: client,
 		Site:      site,
+		Protect:   protectClient,
 	}
 
 	resp.DataSourceData = configuredClient
@@ -304,6 +315,7 @@ func (p *unifiProvider) Resources(ctx context.Context) []func() resource.Resourc
 		NewPortForwardResource,
 		NewPortProfileFrameworkResource,
 		NewPowerSupervisorResource,
+		NewProtectSensorResource,
 		NewRadiusProfileResource,
 		NewSettingResource,
 		NewSiteFrameworkResource,

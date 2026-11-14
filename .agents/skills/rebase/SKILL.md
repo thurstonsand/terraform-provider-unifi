@@ -66,6 +66,9 @@ What the fork actually carries, and therefore what to check:
 - provider: the `mdns` block on `unifi_setting`, read-modify-write over the remote setting
 - provider: `mac_override` on `unifi_wan`, sensitive, validated without echoing, and clearable by deleting it from HCL
 - provider: `identitySchemaVersion` and the version 0 identity upgraders in `unifi/identity_upgrade.go`
+- SDK: the UniFi OS session seam in `unifi/unifi.go` (`acquireSession`, `send`, `observeSession`, exported `ResolveURL` and `Do`), kept small because upstream churns that file
+- SDK: the `protect` package, generated from the committed Protect Integration API spec by `go generate ./protect/`
+- provider: `unifi_protect_sensor`, a settings overlay on adopted Protect sensors whose destroy is state-only and which never sends `alarmSettings`
 - repository: fork guards around upstream-only Codecov and issue-triage jobs, manual acceptance dispatch, and release packaging without upstream's GPG credentials
 
 If upstream now supplies equivalent behavior, remove that part from the fork. Prefer upstream's schema unless it cannot express ansiblonomicon's declaration. Do not remove an upstream fallback or deprecated surface merely because ansiblonomicon does not use it: unchanged upstream code adds no fork delta.
@@ -130,10 +133,12 @@ Push the SDK release branch, then pin the provider to that commit:
 
 ```sh
 git -C ../go-unifi push --force-with-lease origin release
-(cd .. && GOFLAGS=-mod=mod go get github.com/thurstonsand/go-unifi@<sha>)
+GOFLAGS=-mod=mod go get github.com/thurstonsand/go-unifi@<sha>   # errors, but prints the pseudo-version
+go mod edit -replace github.com/ubiquiti-community/go-unifi=github.com/thurstonsand/go-unifi@<pseudo-version>
+GOFLAGS=-mod=mod go build ./...
 ```
 
-`go get` writes the pseudo-version, which encodes the base version, the commit time, and the short sha. Confirm `go.mod` and `go.sum` picked it up and that `go build ./...` resolves it from the module proxy rather than a local cache. A pseudo-version only resolves once the commit is public, so this ordering is not optional.
+`go get github.com/thurstonsand/go-unifi@<sha>` fails because the fork's `go.mod` declares the upstream module path, but its error message names the pseudo-version, which encodes the base version, the commit time, and the short sha. Remove any local `go.work` first. Confirm `go.mod` and `go.sum` picked it up and that `go build ./...` resolves it from the module proxy rather than a local cache. A pseudo-version only resolves once the commit is public, so this ordering is not optional.
 
 Draft the provider's annotated tag message and present it to Thurston before creating the tag.
 
